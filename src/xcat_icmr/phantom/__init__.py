@@ -1,0 +1,93 @@
+"""XCAT parameter preparation and, later, label-volume handling."""
+
+from xcat_icmr.phantom.binary import (
+    XcatBinaryReadError,
+    XcatBinaryVolume,
+    open_xcat_binary,
+    xcat_raw_shape,
+)
+from xcat_icmr.phantom.conversion import (
+    XcatLabelConversion,
+    XcatLabelConversionError,
+    convert_xcat_labels_to_mat,
+    format_xcat_label_conversion,
+)
+from xcat_icmr.phantom.frames import (
+    XcatFrame,
+    XcatFramePlan,
+    XcatFramePlanError,
+    format_xcat_frame_plan,
+    plan_xcat_frames,
+)
+from xcat_icmr.phantom.parameters import (
+    XcatParameterError,
+    XcatParameterFile,
+    XcatMotionPlan,
+    build_xcat_parameter_values,
+    format_xcat_parameter_summary,
+    prepare_xcat_parameter_file,
+    plan_xcat_motion_cycle,
+    render_xcat_parameter_file,
+)
+from xcat_icmr.phantom.matlab_labels import (
+    XcatLabelComparison,
+    XcatLabelComparisonError,
+    compare_xcat_labels_to_matlab,
+    format_xcat_label_comparison,
+    validate_xcat_labels,
+)
+from xcat_icmr.phantom.runner import (
+    PreflightCheck,
+    XcatExecutionError,
+    XcatExecutionResult,
+    XcatInvocation,
+    XcatPreflightReport,
+    build_xcat_invocation,
+    execute_xcat_invocation,
+    expected_xcat_binary_bytes,
+    format_xcat_execution,
+    format_xcat_preflight,
+    preflight_xcat_invocation,
+    verify_xcat_binary_outputs,
+)
+
+__all__ = [
+    "PreflightCheck",
+    "XcatBinaryReadError",
+    "XcatBinaryVolume",
+    "XcatExecutionError",
+    "XcatExecutionResult",
+    "XcatFrame",
+    "XcatFramePlan",
+    "XcatFramePlanError",
+    "XcatLabelComparison",
+    "XcatLabelComparisonError",
+    "XcatLabelConversion",
+    "XcatLabelConversionError",
+    "XcatParameterError",
+    "XcatParameterFile",
+    "XcatMotionPlan",
+    "XcatInvocation",
+    "XcatPreflightReport",
+    "build_xcat_parameter_values",
+    "build_xcat_invocation",
+    "compare_xcat_labels_to_matlab",
+    "convert_xcat_labels_to_mat",
+    "execute_xcat_invocation",
+    "expected_xcat_binary_bytes",
+    "format_xcat_parameter_summary",
+    "format_xcat_preflight",
+    "format_xcat_execution",
+    "format_xcat_frame_plan",
+    "format_xcat_label_comparison",
+    "format_xcat_label_conversion",
+    "open_xcat_binary",
+    "prepare_xcat_parameter_file",
+    "preflight_xcat_invocation",
+    "verify_xcat_binary_outputs",
+    "plan_xcat_motion_cycle",
+    "plan_xcat_frames",
+    "render_xcat_parameter_file",
+    "xcat_raw_shape",
+    "validate_xcat_labels",
+]

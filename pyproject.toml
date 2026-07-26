@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xcat-icmr"
+version = "0.1.0"
+description = "Dynamic interventional cardiovascular MRI simulation with XCAT phantoms"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "h5py>=3.8,<4",
+    "numpy>=1.24,<3",
+    "pydantic>=2,<3",
+    "PyYAML>=6,<7",
+    "scipy>=1.10,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+]
+
+[project.scripts]
+xcat-icmr = "xcat_icmr.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

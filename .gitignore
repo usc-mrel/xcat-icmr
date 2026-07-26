@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+build/
+dist/
+
+# Local simulation configurations and generated data
+configs/*.yaml
+!configs/simulation.template.yaml
+outputs/
+*.mat
+*.h5
+*.hdf5

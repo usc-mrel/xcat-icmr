@@ -1,0 +1,112 @@
+schema_version: 1
+
+run:
+  id: test-run
+  output_root: outputs/test-run
+
+compute:
+  device_id: -1
+
+resources:
+  xcat:
+    executable: resources/xcat/dxcat
+    parameter_template: resources/xcat/template.par
+
+outputs:
+  save_tissue_labels: true
+  save_contrast_images: true
+  save_fully_sampled_kspace: true
+  retain_xcat_binary_files: false
+
+scanner:
+  field_strength_t: 0.55
+  effects:
+    off_resonance:
+      enabled: false
+      field_map: null
+    concomitant_fields:
+      enabled: false
+    gradient_nonlinearity:
+      enabled: false
+
+sequence:
+  folder: resources/sequence
+  file: test.seq
+  metadata_directory: resources/metadata
+  orientation: COR
+  rf_direction: LR
+  contrast:
+    model: bssfp
+    tissue_library: test-tissues
+
+timeline:
+  duration_s: 1.0
+  xcat_time_step_s: 0.005
+  kspace_time_step_s: 0.050
+  xcat_to_kspace: average
+
+phantom:
+  orientation: SAG
+  anatomy:
+    sex: male
+    papillary_muscles: false
+  voxel_size_mm: [1.0, 1.0, 1.0]
+  matrix_size_xy: 64
+  slice_range:
+    start: 10
+    end: 20
+  transform:
+    additional_rotation_deg_xyz: [0.0, 0.0, 0.0]
+    translation_mm_xyz: [0.0, 0.0, 0.0]
+  crop:
+    rows: [0, 64]
+    columns: [0, 64]
+  motion:
+    mode: breath-hold
+    cardiac:
+      heart_rate_bpm: 60
+      start_phase: 0.0
+    respiratory:
+      breaths_per_minute: null
+      start_phase: 0.4
+      diaphragm_motion_cm: 1.0
+      anterior_posterior_expansion_cm: 0.2
+
+intervention:
+  gd_balloon:
+    enabled: false
+    path:
+      control_points_file: null
+      format: 3d-slicer-markups
+      coordinate_system: auto
+      interpolation: cubic-arc-length
+    movement:
+      velocity_cm_per_s: 0.5
+      start_time_s: 0.0
+    geometry:
+      shape: ellipsoid
+      diameter_mm: [10.0, 10.0, 10.0]
+    contrast_agent:
+      agent: gadolinium
+      carrier_tissue: blood
+      concentration:
+        type: final-concentration
+        value_mM: 1.1
+      relaxivity_library: test-relaxivity
+    composition:
+      mode: additive
+
+coils:
+  enabled: false
+  sensitivity_map: null
+  normalize: false
+
+undersampling:
+  enabled: false
+  frame_duration_s: 0.050
+
+noise:
+  enabled: false
+  snr_db: 30
+  coil_covariance: identity
+  seed: 12345

@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import yaml
+
+from xcat_icmr.config.models import SimulationConfig
+from xcat_icmr.phantom import (
+    XcatExecutionError,
+    execute_xcat_invocation,
+    expected_xcat_binary_bytes,
+    plan_xcat_frames,
+    prepare_xcat_parameter_file,
+)
+from xcat_icmr.phantom.runner import (
+    build_xcat_invocation,
+    format_xcat_preflight,
+    preflight_xcat_invocation,
+)
+
+
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "valid_simulation.yaml"
+
+
+def make_runtime(tmp_path: Path) -> SimulationConfig:
+    data = yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+    config = SimulationConfig.model_validate(data)
+    config.run.output_root = tmp_path / "outputs"
+
+    runtime = tmp_path / "xcat-runtime"
+    runtime.mkdir()
+    executable = runtime / "dxcat"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    for name in (
+        "vmale50_heart.nrb",
+        "vmale50.nrb",
+        "heart_curve.txt",
+        "diaphragm_curve.dat",
+        "ap_curve.dat",
+    ):
+        (runtime / name).touch()
+    template = runtime / "template.par"
+    template.write_text(
+        "\n".join(
+            (
+                "heart_base = vmale50_heart.nrb",
+                "organ_file = vmale50.nrb",
+                "heart_curve_file = heart_curve.txt",
+                "dia_filename = diaphragm_curve.dat",
+                "ap_filename = ap_curve.dat",
+                "out_frames = 1",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    config.resources.xcat.executable = executable
+    config.resources.xcat.parameter_template = template
+    return config
+
+
+def prepare(
+    config: SimulationConfig,
+    *,
+    debug_one_frame: bool = True,
+):
+    parameters = prepare_xcat_parameter_file(
+        config, debug_one_frame=debug_one_frame
+    )
+    frames = plan_xcat_frames(
+        config, debug_one_frame=debug_one_frame
+    )
+    return parameters, frames
+
+
+def test_builds_non_shell_command_with_xcat_working_directory(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+
+    invocation = build_xcat_invocation(config, parameters, frames)
+
+    assert invocation.working_directory == config.resources.xcat.executable.parent
+    assert invocation.command == (
+        str(config.resources.xcat.executable),
+        str(parameters.output_path),
+        "--phan_rotx",
+        "0",
+        "--phan_roty",
+        "90",
+        "--phan_rotz",
+        "0",
+        str(frames.output_prefix),
+    )
+
+
+def test_preflight_passes_for_new_output(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    assert report.passed
+    assert report.output_state == "new"
+    assert "Would execute: no (--dry-run)" in format_xcat_preflight(report)
+
+
+def test_preflight_treats_complete_labels_as_reusable(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+    label = frames.frames[0].label_path
+    assert label is not None
+    label.parent.mkdir(parents=True)
+    label.touch()
+    frames = plan_xcat_frames(config)
+
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    assert report.passed
+    assert report.output_state == "complete"
+
+
+def test_preflight_rejects_partial_full_cycle(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config, debug_one_frame=False)
+    first_binary = frames.frames[0].binary_path
+    first_binary.parent.mkdir(parents=True)
+    first_binary.touch()
+    frames = plan_xcat_frames(config, debug_one_frame=False)
+
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    assert not report.passed
+    assert report.output_state == "partial"
+
+
+def test_preflight_reports_missing_runtime_asset(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+    (config.resources.xcat.executable.parent / "heart_curve.txt").unlink()
+
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    assert not report.passed
+    missing = next(
+        check
+        for check in report.checks
+        if check.name == "runtime asset: heart_curve_file"
+    )
+    assert not missing.passed
+
+
+def set_fake_executable(config: SimulationConfig, script: str) -> None:
+    executable = config.resources.xcat.executable
+    executable.write_text(script, encoding="utf-8")
+    executable.chmod(0o755)
+
+
+def test_execution_writes_logs_record_and_exact_binary(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    expected = expected_xcat_binary_bytes(config)
+    set_fake_executable(
+        config,
+        (
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do prefix=\"$arg\"; done\n"
+            f"dd if=/dev/zero of=\"${{prefix}}_act_1.bin\" "
+            f"bs={expected} count=1 status=none\n"
+            "echo generated\n"
+        ),
+    )
+    parameters, frames = prepare(config)
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    result = execute_xcat_invocation(config, frames, report)
+
+    assert result.status == "executed"
+    assert result.return_code == 0
+    assert result.binary_sizes == ((frames.frames[0].binary_path, expected),)
+    assert result.stdout_log is not None and result.stdout_log.is_file()
+    assert result.stderr_log is not None and result.stderr_log.is_file()
+    assert (
+        result.invocation_record is not None
+        and result.invocation_record.is_file()
+    )
+
+
+def test_execution_rejects_truncated_binary(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    set_fake_executable(
+        config,
+        (
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do prefix=\"$arg\"; done\n"
+            "printf bad > \"${prefix}_act_1.bin\"\n"
+        ),
+    )
+    parameters, frames = prepare(config)
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    with pytest.raises(XcatExecutionError, match="wrong size"):
+        execute_xcat_invocation(config, frames, report)
+
+
+def test_execution_reports_nonzero_exit(tmp_path: Path) -> None:
+    config = make_runtime(tmp_path)
+    set_fake_executable(config, "#!/bin/sh\nexit 7\n")
+    parameters, frames = prepare(config)
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    with pytest.raises(XcatExecutionError, match="return code 7"):
+        execute_xcat_invocation(config, frames, report)
+
+
+def test_execution_reuses_complete_binary_without_subprocess(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+    binary = frames.frames[0].binary_path
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"\0" * expected_xcat_binary_bytes(config))
+    frames = plan_xcat_frames(config)
+    report = preflight_xcat_invocation(config, parameters, frames)
+
+    result = execute_xcat_invocation(config, frames, report)
+
+    assert result.status == "reused"
+    assert result.return_code is None
+    assert result.stdout_log is None
