@@ -28,8 +28,8 @@ def make_binary(path: Path, config: SimulationConfig) -> np.ndarray:
     shape = (
         config.phantom.matrix_size_xy,
         config.phantom.matrix_size_xy,
-        config.phantom.slice_range.end
-        - config.phantom.slice_range.start
+        config.phantom.head_foot_slice_range.end
+        - config.phantom.head_foot_slice_range.start
         + 1,
     )
     values = np.arange(np.prod(shape), dtype=np.int64) % 72

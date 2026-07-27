@@ -15,14 +15,16 @@ class BssfpSignalError(ValueError):
 
 
 def _validate_sequence_parameters(
-    flip_angle_deg: float,
+    flip_angle_deg: npt.ArrayLike,
     te_ms: float,
     tr_ms: float,
-) -> None:
-    values = (flip_angle_deg, te_ms, tr_ms)
-    if not all(math.isfinite(value) for value in values):
-        raise BssfpSignalError("flip angle, TE, and TR must be finite")
-    if not 0.0 <= flip_angle_deg <= 180.0:
+) -> np.ndarray:
+    flip = np.asarray(flip_angle_deg, dtype=np.float64)
+    if not np.all(np.isfinite(flip)):
+        raise BssfpSignalError("flip angle must be finite")
+    if not math.isfinite(te_ms) or not math.isfinite(tr_ms):
+        raise BssfpSignalError("TE and TR must be finite")
+    if np.any(flip < 0.0) or np.any(flip > 180.0):
         raise BssfpSignalError("flip_angle_deg must be between 0 and 180")
     if te_ms < 0.0:
         raise BssfpSignalError("te_ms must be non-negative")
@@ -30,6 +32,7 @@ def _validate_sequence_parameters(
         raise BssfpSignalError("tr_ms must be positive")
     if te_ms > tr_ms:
         raise BssfpSignalError("te_ms cannot be greater than tr_ms")
+    return flip
 
 
 def _as_nonnegative_finite_array(
@@ -49,7 +52,7 @@ def bssfp_signal(
     t2_ms: npt.ArrayLike,
     proton_density_percent: npt.ArrayLike,
     *,
-    flip_angle_deg: float,
+    flip_angle_deg: npt.ArrayLike,
     te_ms: float,
     tr_ms: float,
     off_resonance_enabled: bool = False,
@@ -68,7 +71,7 @@ def bssfp_signal(
             "off-resonance bSSFP signal simulation is not implemented"
         )
 
-    _validate_sequence_parameters(flip_angle_deg, te_ms, tr_ms)
+    flip_deg = _validate_sequence_parameters(flip_angle_deg, te_ms, tr_ms)
     t1 = _as_nonnegative_finite_array(t1_ms, "t1_ms")
     t2 = _as_nonnegative_finite_array(t2_ms, "t2_ms")
     pd = _as_nonnegative_finite_array(
@@ -76,13 +79,13 @@ def bssfp_signal(
     )
 
     try:
-        t1, t2, pd = np.broadcast_arrays(t1, t2, pd)
+        t1, t2, pd, flip_deg = np.broadcast_arrays(t1, t2, pd, flip_deg)
     except ValueError as exc:
         raise BssfpSignalError(
             "T1, T2, and proton-density arrays are not broadcast-compatible"
         ) from exc
 
-    flip_rad = np.deg2rad(float(flip_angle_deg))
+    flip_rad = np.deg2rad(flip_deg)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         e1 = np.exp(-float(tr_ms) / t1)
         e2 = np.exp(-float(tr_ms) / t2)
@@ -108,7 +111,7 @@ def bssfp_signal(
 def bssfp_signal_from_tissue_properties(
     properties: TissueParameterVolumes,
     *,
-    flip_angle_deg: float,
+    flip_angle_deg: npt.ArrayLike,
     te_ms: float,
     tr_ms: float,
     off_resonance_enabled: bool = False,

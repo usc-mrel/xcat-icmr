@@ -4,6 +4,7 @@ from xcat_icmr.phantom.binary import (
     XcatBinaryReadError,
     XcatBinaryVolume,
     open_xcat_binary,
+    xcat_label_shape,
     xcat_raw_shape,
 )
 from xcat_icmr.phantom.conversion import (
@@ -40,10 +41,12 @@ from xcat_icmr.phantom.runner import (
     PreflightCheck,
     XcatExecutionError,
     XcatExecutionResult,
+    StreamingXcatResult,
     XcatInvocation,
     XcatPreflightReport,
     build_xcat_invocation,
     execute_xcat_invocation,
+    execute_streaming_xcat_invocation,
     expected_xcat_binary_bytes,
     format_xcat_execution,
     format_xcat_preflight,
@@ -57,6 +60,7 @@ __all__ = [
     "XcatBinaryVolume",
     "XcatExecutionError",
     "XcatExecutionResult",
+    "StreamingXcatResult",
     "XcatFrame",
     "XcatFramePlan",
     "XcatFramePlanError",
@@ -74,6 +78,7 @@ __all__ = [
     "compare_xcat_labels_to_matlab",
     "convert_xcat_labels_to_mat",
     "execute_xcat_invocation",
+    "execute_streaming_xcat_invocation",
     "expected_xcat_binary_bytes",
     "format_xcat_parameter_summary",
     "format_xcat_preflight",
@@ -89,5 +94,6 @@ __all__ = [
     "plan_xcat_frames",
     "render_xcat_parameter_file",
     "xcat_raw_shape",
+    "xcat_label_shape",
     "validate_xcat_labels",
 ]

@@ -11,6 +11,10 @@ import numpy as np
 from scipy.io import loadmat
 
 from xcat_icmr.config.models import SequenceConfig
+from xcat_icmr.sequence.orientation import (
+    logical_to_dcs_matrix,
+    transform_vector_components,
+)
 
 
 class SequenceReadError(Exception):
@@ -19,26 +23,49 @@ class SequenceReadError(Exception):
 
 @dataclass(frozen=True)
 class SequenceData:
-    """Resolved sequence parameters and oriented trajectory arrays."""
+    """Resolved sequence parameters with logical and derived DCS trajectories."""
 
     sequence_path: Path
     metadata_path: Path
     signature_type: str
     signature: str
+    coordinate_mode: str
     orientation: str
+    logical_to_dcs: np.ndarray
     fov_mm: np.ndarray
     resolution_mm: np.ndarray
     flip_angle_deg: float
     te_ms: float
     tr_ms: float
-    kx: np.ndarray
-    ky: np.ndarray
-    kz: np.ndarray
+    logical_kx: np.ndarray
+    logical_ky: np.ndarray
+    logical_kz: np.ndarray
+    dcs_kx: np.ndarray
+    dcs_ky: np.ndarray
+    dcs_kz: np.ndarray
     density_compensation: np.ndarray
     interleaves: int | None
     planes: int | None
     pre_discard: int | None
     sample_time_s: float | None
+
+    @property
+    def kx(self) -> np.ndarray:
+        """Pulseq logical kx; retained for encoding compatibility."""
+
+        return self.logical_kx
+
+    @property
+    def ky(self) -> np.ndarray:
+        """Pulseq logical ky; retained for encoding compatibility."""
+
+        return self.logical_ky
+
+    @property
+    def kz(self) -> np.ndarray:
+        """Pulseq logical kz; retained for encoding compatibility."""
+
+        return self.logical_kz
 
     @property
     def trajectory_shape(self) -> tuple[int, int]:
@@ -129,25 +156,6 @@ def _as_trajectory(data: dict[str, Any], name: str) -> np.ndarray:
     return array
 
 
-def orient_trajectory(
-    kx: np.ndarray,
-    ky: np.ndarray,
-    kz: np.ndarray,
-    orientation: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Apply the logical-to-DCS mapping used by MATLAB config.m."""
-
-    if orientation == "TRA":
-        return ky, kx, kz
-    if orientation == "COR":
-        return ky, kz, kx
-    if orientation == "SAG":
-        return kz, ky, kx
-    if orientation == "2D":
-        return kx, ky, np.zeros_like(kx)
-    raise SequenceReadError(f"unsupported sequence orientation: {orientation}")
-
-
 def read_sequence(config: SequenceConfig) -> SequenceData:
     """Resolve a Pulseq sequence and its signature-keyed metadata file."""
 
@@ -187,8 +195,11 @@ def read_sequence(config: SequenceConfig) -> SequenceData:
             f"got {sorted(shapes)}"
         )
 
-    kx, ky, kz = orient_trajectory(
-        raw_kx, raw_ky, raw_kz, config.orientation
+    logical_to_dcs = logical_to_dcs_matrix(
+        config.coordinate_mode, config.orientation
+    )
+    dcs_kx, dcs_ky, dcs_kz = transform_vector_components(
+        logical_to_dcs, raw_kx, raw_ky, raw_kz
     )
     fov_mm = np.atleast_1d(
         np.asarray(_required_param(param, "fov"), dtype=np.float64).squeeze()
@@ -204,15 +215,20 @@ def read_sequence(config: SequenceConfig) -> SequenceData:
         metadata_path=metadata_path,
         signature_type=signature_type,
         signature=signature,
+        coordinate_mode=config.coordinate_mode,
         orientation=config.orientation,
+        logical_to_dcs=logical_to_dcs,
         fov_mm=fov_mm,
         resolution_mm=resolution_mm,
         flip_angle_deg=float(np.asarray(_required_param(param, "FA")).squeeze()),
         te_ms=float(np.asarray(_required_param(param, "TE")).squeeze()),
         tr_ms=float(np.asarray(_required_param(param, "TR")).squeeze()),
-        kx=kx,
-        ky=ky,
-        kz=kz,
+        logical_kx=raw_kx,
+        logical_ky=raw_ky,
+        logical_kz=raw_kz,
+        dcs_kx=dcs_kx,
+        dcs_ky=dcs_ky,
+        dcs_kz=dcs_kz,
         density_compensation=dcf,
         interleaves=_optional_int(param, "interleaves"),
         planes=_optional_int(param, "planes"),
@@ -232,7 +248,18 @@ def format_sequence_summary(data: SequenceData) -> str:
         ("Sequence", data.sequence_path.name),
         ("Signature", data.signature),
         ("Metadata", str(data.metadata_path)),
+        ("Coordinate mode", data.coordinate_mode),
         ("Orientation", data.orientation),
+        ("Stored trajectory", "Pulseq logical [kx, ky, kz]"),
+        (
+            "Derived DCS mapping",
+            "[X, Y, Z] = "
+            + {
+                "TRA": "[ky, kx, kz]",
+                "COR": "[ky, kz, kx]",
+                "SAG": "[kz, ky, kx]",
+            }[data.orientation],
+        ),
         ("TE", f"{data.te_ms:g} ms"),
         ("TR", f"{data.tr_ms:g} ms"),
         ("Flip angle", f"{data.flip_angle_deg:g} deg"),

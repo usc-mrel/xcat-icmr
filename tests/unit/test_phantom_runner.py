@@ -8,6 +8,7 @@ import yaml
 from xcat_icmr.config.models import SimulationConfig
 from xcat_icmr.phantom import (
     XcatExecutionError,
+    execute_streaming_xcat_invocation,
     execute_xcat_invocation,
     expected_xcat_binary_bytes,
     plan_xcat_frames,
@@ -90,7 +91,7 @@ def test_builds_non_shell_command_with_xcat_working_directory(
         "--phan_rotx",
         "0",
         "--phan_roty",
-        "90",
+        "0",
         "--phan_rotz",
         "0",
         str(frames.output_prefix),
@@ -134,6 +135,28 @@ def test_preflight_rejects_partial_full_cycle(tmp_path: Path) -> None:
     report = preflight_xcat_invocation(config, parameters, frames)
 
     assert not report.passed
+    assert report.output_state == "partial"
+
+
+def test_streaming_preflight_accepts_resumable_partial_cycle(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config, debug_one_frame=False)
+    label = frames.frames[0].label_path
+    assert label is not None
+    label.parent.mkdir(parents=True)
+    label.touch()
+    frames = plan_xcat_frames(config, debug_one_frame=False)
+
+    report = preflight_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        allow_partial_outputs=True,
+    )
+
+    assert report.passed
     assert report.output_state == "partial"
 
 
@@ -231,3 +254,81 @@ def test_execution_reuses_complete_binary_without_subprocess(
     assert result.status == "reused"
     assert result.return_code is None
     assert result.stdout_log is None
+
+
+def test_streaming_execution_consumes_and_removes_each_frame(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    config.timeline.xcat_time_step_s = 0.5
+    config.timeline.kspace_time_step_s = 0.5
+    expected = expected_xcat_binary_bytes(config)
+    set_fake_executable(
+        config,
+        (
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do prefix=\"$arg\"; done\n"
+            f"dd if=/dev/zero of=\"${{prefix}}_act_1.bin\" "
+            f"bs={expected} count=1 status=none\n"
+            "sleep 0.1\n"
+            f"dd if=/dev/zero of=\"${{prefix}}_act_2.bin\" "
+            f"bs={expected} count=1 status=none\n"
+        ),
+    )
+    parameters, frames = prepare(config, debug_one_frame=False)
+    report = preflight_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        allow_partial_outputs=True,
+    )
+    consumed = []
+
+    def consume(frame) -> None:
+        assert frame.binary_path.stat().st_size == expected
+        assert frame.label_path is not None
+        frame.label_path.parent.mkdir(parents=True, exist_ok=True)
+        frame.label_path.touch()
+        frame.binary_path.unlink()
+        consumed.append(frame.index)
+
+    result = execute_streaming_xcat_invocation(
+        config,
+        frames,
+        report,
+        consume,
+        poll_interval_s=0.01,
+    )
+
+    assert consumed == [1, 2]
+    assert result.consumed_frame_count == 2
+    assert not any(frame.binary_path.exists() for frame in frames.frames)
+    assert all(
+        frame.label_path is not None and frame.label_path.exists()
+        for frame in frames.frames
+    )
+
+
+def test_streaming_execution_refuses_partial_leftover(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+    binary = frames.frames[0].binary_path
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"partial")
+    frames = plan_xcat_frames(config)
+    report = preflight_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        allow_partial_outputs=True,
+    )
+
+    with pytest.raises(XcatExecutionError, match="partial raw frame"):
+        execute_streaming_xcat_invocation(
+            config,
+            frames,
+            report,
+            lambda frame: None,
+        )

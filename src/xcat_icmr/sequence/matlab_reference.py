@@ -152,9 +152,9 @@ def compare_to_matlab(
                 data.resolution_mm,
                 np.atleast_1d(np.asarray(seq["res"][()]).squeeze()),
             ),
-            _compare_transposed_dataset("kx", data.kx, seq["kx"]),
-            _compare_transposed_dataset("ky", data.ky, seq["ky"]),
-            _compare_transposed_dataset("kz", data.kz, seq["kz"]),
+            _compare_transposed_dataset("kx", data.dcs_kx, seq["kx"]),
+            _compare_transposed_dataset("ky", data.dcs_ky, seq["ky"]),
+            _compare_transposed_dataset("kz", data.dcs_kz, seq["kz"]),
         ]
 
         metadata_path = "metadata/w"

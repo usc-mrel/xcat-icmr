@@ -76,6 +76,23 @@ def test_broadcasts_scalar_and_array_properties() -> None:
     np.testing.assert_allclose(signal[1], signal[0] / 2.0, rtol=1e-6)
 
 
+def test_broadcasts_spatially_varying_flip_angle() -> None:
+    flips = np.array([0.0, 30.0, 65.0])
+    signal = bssfp_signal(
+        t1_ms=701.0,
+        t2_ms=58.0,
+        proton_density_percent=80.0,
+        flip_angle_deg=flips,
+        te_ms=SEQUENCE["te_ms"],
+        tr_ms=SEQUENCE["tr_ms"],
+    )
+
+    assert signal.shape == flips.shape
+    assert signal[0] == 0
+    assert signal[1] > 0
+    np.testing.assert_allclose(signal[2], 8.900946, rtol=1e-6)
+
+
 def test_undefined_zero_relaxation_signal_becomes_zero() -> None:
     signal = bssfp_signal(
         t1_ms=0.0,

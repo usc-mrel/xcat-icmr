@@ -55,8 +55,13 @@ sequence:
 
   # TE, TR, flip angle, FOV, resolution, trajectory, and DCF are read from
   # sequence metadata.
+  coordinate_mode: XYZ-in-TRA
   orientation: COR
   rf_direction: LR
+  rf_profile:
+    # Signed patient-coordinate displacement: positive LR is toward Left.
+    # The selection gradient and phantom remain fixed; only RF phase is shifted.
+    center_shift_mm: 20.0
 
   contrast:
     model: bssfp
@@ -81,7 +86,9 @@ timeline:
 # XCAT phantom and physiological motion
 # -------------------------------------------------------------------------------------------------
 phantom:
-  orientation: SAG
+  # HFS uses native XCAT patient coordinates:
+  # +x left, +y posterior, +z superior (LPS).
+  patient_position: HFS
 
   anatomy:
     sex: male
@@ -90,17 +97,21 @@ phantom:
   voxel_size_mm: [1.0, 1.0, 1.0]
   matrix_size_xy: 1024
 
-  slice_range:
-    start: 1054
-    end: 1246
+  # XCAT slice indices are inclusive; this limits head-foot coverage.
+  head_foot_slice_range:
+    start: 1050
+    end: 1519
+
+  # Optional in-plane crops use MATLAB indexing: 1-based and inclusive.
+  # Keep null to retain the complete direction.
+  in_plane_crop:
+    # This cardiac-focused crop does not include the arms entirely.
+    right_left: [300, 735]
+    anterior_posterior: [380, 639]
 
   transform:
     additional_rotation_deg_xyz: [0.0, 0.0, 0.0]
     translation_mm_xyz: [0.0, 0.0, 0.0]
-
-  crop:
-    rows: [110, 580]
-    columns: [385, 635]
 
   motion:
     # no-motion | breath-hold | free-breathing
@@ -156,6 +167,10 @@ coils:
   # This prepared map already excludes original zero-based coils 4 and 7.
   # No coil selection or removal is performed by the simulation code.
   sensitivity_map: /server/home/yagiz/CardiacXCATSim/phantom0373_20240221/sens_phantom_ey_interp_16coil.mat
+  # The prepared legacy map is declared in scanner Device Coordinates.
+  # Spatial array dimensions correspond to [X_DCS, Y_DCS, Z_DCS].
+  coordinate_frame: DCS
+  axis_order: [X, Y, Z]
 
   # Apply voxelwise root-sum-of-squares normalization when the map is loaded.
   normalize: true

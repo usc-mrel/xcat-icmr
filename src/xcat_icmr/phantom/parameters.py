@@ -44,13 +44,6 @@ class XcatParameterFile:
     appended_parameters: tuple[str, ...]
 
 
-_ORIENTATION_ROTATIONS = {
-    "SAG": (0, 90, 0),
-    "COR": (90, 0, 0),
-    "TRA": (0, 0, 0),
-    "SAX": (115, 35, 240),
-}
-
 _PARAMETER_LINE = re.compile(
     r"^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
     r"(?P<assignment>\s*=\s*)(?P<value>.*?)\s*$"
@@ -184,15 +177,18 @@ def build_xcat_parameter_values(
     translation_x, translation_y, translation_z = (
         config.phantom.transform.translation_mm_xyz
     )
-    phan_rotx, phan_roty, phan_rotz = _ORIENTATION_ROTATIONS[
-        config.phantom.orientation
-    ]
+    if config.phantom.patient_position != "HFS":
+        raise XcatParameterError(
+            "only the HFS patient position is currently implemented"
+        )
 
     is_female = config.phantom.anatomy.sex == "female"
     parameters: dict[str, ParameterValue] = {
-        "phan_rotx": phan_rotx,
-        "phan_roty": phan_roty,
-        "phan_rotz": phan_rotz,
+        # Native XCAT coordinates are used for HFS:
+        # +x left, +y posterior, +z superior (LPS).
+        "phan_rotx": 0,
+        "phan_roty": 0,
+        "phan_rotz": 0,
         "d_ZY_rotation": rotation_x,
         "d_XZ_rotation": rotation_y,
         "d_YX_rotation": rotation_z,
@@ -202,8 +198,8 @@ def build_xcat_parameter_values(
         "pixel_width": voxel_x / 10.0,
         "slice_width": voxel_z / 10.0,
         "array_size": config.phantom.matrix_size_xy,
-        "startslice": config.phantom.slice_range.start,
-        "endslice": config.phantom.slice_range.end,
+        "startslice": config.phantom.head_foot_slice_range.start,
+        "endslice": config.phantom.head_foot_slice_range.end,
         "gender": int(is_female),
         "heart_base": (
             "vfemale50_heart.nrb" if is_female else "vmale50_heart.nrb"

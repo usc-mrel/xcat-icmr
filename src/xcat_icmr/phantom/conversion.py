@@ -1,4 +1,4 @@
-"""Conversion of cropped XCAT label binaries to MATLAB files."""
+"""Conversion of HF-limited, full-RL/AP XCAT label binaries to MATLAB files."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def convert_xcat_labels_to_mat(
     chunk_slices: int = 8,
     overwrite: bool = False,
 ) -> XcatLabelConversion:
-    """Validate, save, and reopen one cropped label volume as MATLAB ``P``."""
+    """Validate, save, and reopen one XCAT label volume as MATLAB ``P``."""
 
     destination = Path(output_path).expanduser().resolve(strict=False)
     if destination.exists() and not overwrite:
@@ -68,7 +68,7 @@ def convert_xcat_labels_to_mat(
             temporary_path = Path(temporary.name)
 
         # MATLAB v5 files are directly loadable by MATLAB and are sufficient
-        # here because one cropped float32 frame is well below the 2 GB limit.
+        # here while a float32 frame remains below the MATLAB v5 2 GB limit.
         labels = np.asarray(volume.cropped, dtype=np.float32)
         savemat(
             temporary_path,

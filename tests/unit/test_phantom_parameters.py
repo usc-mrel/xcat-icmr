@@ -31,7 +31,7 @@ def test_translates_matlab_equivalent_phantom_values() -> None:
 
     assert (values["phan_rotx"], values["phan_roty"], values["phan_rotz"]) == (
         0,
-        90,
+        0,
         0,
     )
     assert values["pixel_width"] == 0.1
@@ -124,7 +124,7 @@ def test_prepare_preserves_template_and_writes_run_copy(tmp_path: Path) -> None:
     assert result.motion_plan.generated_frame_count == 1
     assert result.command_line_parameters == {
         "phan_rotx": 0,
-        "phan_roty": 90,
+        "phan_roty": 0,
         "phan_rotz": 0,
     }
     assert output.is_file()

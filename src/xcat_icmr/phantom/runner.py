@@ -9,10 +9,11 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
-from typing import Literal
+import time
+from typing import Callable, Literal
 
 from xcat_icmr.config.models import SimulationConfig
-from xcat_icmr.phantom.frames import XcatFramePlan
+from xcat_icmr.phantom.frames import XcatFrame, XcatFramePlan
 from xcat_icmr.phantom.parameters import XcatParameterFile
 
 
@@ -71,6 +72,17 @@ class XcatExecutionResult:
     stdout_log: Path | None
     stderr_log: Path | None
     invocation_record: Path | None
+
+
+@dataclass(frozen=True)
+class StreamingXcatResult:
+    """Outcome of an XCAT run whose completed frames were consumed online."""
+
+    return_code: int
+    consumed_frame_count: int
+    expected_binary_bytes: int
+    stdout_log: Path
+    stderr_log: Path
 
 
 def build_xcat_invocation(
@@ -175,6 +187,8 @@ def preflight_xcat_invocation(
     config: SimulationConfig,
     parameters: XcatParameterFile,
     frames: XcatFramePlan,
+    *,
+    allow_partial_outputs: bool = False,
 ) -> XcatPreflightReport:
     """Validate an XCAT command without creating output directories or running it."""
 
@@ -233,7 +247,7 @@ def preflight_xcat_invocation(
         ),
         PreflightCheck(
             "existing outputs",
-            output_state != "partial",
+            allow_partial_outputs or output_state != "partial",
             (
                 f"state={output_state}, binaries={binary_count}/{expected}, "
                 f"labels={label_count}/{expected}"
@@ -260,12 +274,131 @@ def preflight_xcat_invocation(
     )
 
 
+def execute_streaming_xcat_invocation(
+    config: SimulationConfig,
+    frames: XcatFramePlan,
+    report: XcatPreflightReport,
+    consume_frame: Callable[[XcatFrame], None],
+    *,
+    poll_interval_s: float = 0.25,
+) -> StreamingXcatResult:
+    """Run XCAT once and consume each closed, complete binary in frame order."""
+
+    if not report.passed:
+        raise XcatExecutionError("streaming XCAT preflight did not pass")
+    if poll_interval_s <= 0:
+        raise ValueError("poll_interval_s must be positive")
+    expected_bytes = expected_xcat_binary_bytes(config)
+
+    # Consume complete leftovers before launching. A partial leftover is
+    # deliberately not removed because it may be the only recoverable copy.
+    for frame in frames.frames:
+        if not frame.binary_path.exists():
+            continue
+        size = frame.binary_path.stat().st_size
+        if size != expected_bytes:
+            raise XcatExecutionError(
+                f"partial raw frame exists before launch: "
+                f"{frame.binary_path} has {size:,} bytes; expected "
+                f"{expected_bytes:,}"
+            )
+        consume_frame(frame)
+
+    if all(frame.label_path is not None and frame.label_path.is_file()
+           for frame in frames.frames):
+        return StreamingXcatResult(
+            return_code=0,
+            consumed_frame_count=len(frames.frames),
+            expected_binary_bytes=expected_bytes,
+            stdout_log=Path(),
+            stderr_log=Path(),
+        )
+
+    frames.raw_directory.mkdir(parents=True, exist_ok=True)
+    logs_directory = config.run.output_root / "xcat" / "logs"
+    logs_directory.mkdir(parents=True, exist_ok=True)
+    attempt = _utc_now().strftime("%Y%m%dT%H%M%S.%fZ")
+    stdout_log = logs_directory / f"xcat_stream_{attempt}.stdout.log"
+    stderr_log = logs_directory / f"xcat_stream_{attempt}.stderr.log"
+    consumed = 0
+
+    with (
+        stdout_log.open("w", encoding="utf-8") as stdout_handle,
+        stderr_log.open("w", encoding="utf-8") as stderr_handle,
+        subprocess.Popen(
+            report.invocation.command,
+            cwd=report.invocation.working_directory,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+        ) as process,
+    ):
+        try:
+            for index, frame in enumerate(frames.frames):
+                next_path = (
+                    frames.frames[index + 1].binary_path
+                    if index + 1 < len(frames.frames)
+                    else None
+                )
+                while True:
+                    return_code = process.poll()
+                    size = (
+                        frame.binary_path.stat().st_size
+                        if frame.binary_path.is_file()
+                        else None
+                    )
+                    producer_advanced = (
+                        next_path is not None and next_path.exists()
+                    )
+                    producer_finished = return_code is not None
+                    if (
+                        size == expected_bytes
+                        and (producer_advanced or producer_finished)
+                    ):
+                        break
+                    if producer_finished:
+                        raise XcatExecutionError(
+                            f"XCAT stopped before frame {frame.index} was "
+                            f"complete (return code {return_code}, "
+                            f"bytes={size})\nstdout: {stdout_log}\n"
+                            f"stderr: {stderr_log}"
+                        )
+                    time.sleep(poll_interval_s)
+
+                consume_frame(frame)
+                consumed += 1
+
+            return_code = process.wait()
+            if return_code != 0:
+                raise XcatExecutionError(
+                    f"XCAT exited with return code {return_code}\n"
+                    f"stdout: {stdout_log}\nstderr: {stderr_log}"
+                )
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            raise
+
+    return StreamingXcatResult(
+        return_code=return_code,
+        consumed_frame_count=consumed,
+        expected_binary_bytes=expected_bytes,
+        stdout_log=stdout_log,
+        stderr_log=stderr_log,
+    )
+
+
 def expected_xcat_binary_bytes(config: SimulationConfig) -> int:
     """Return the exact byte count of one raw float32 XCAT label volume."""
 
     slice_count = (
-        config.phantom.slice_range.end
-        - config.phantom.slice_range.start
+        config.phantom.head_foot_slice_range.end
+        - config.phantom.head_foot_slice_range.start
         + 1
     )
     matrix = config.phantom.matrix_size_xy

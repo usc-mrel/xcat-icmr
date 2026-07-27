@@ -33,8 +33,11 @@ sequence:
   folder: resources/sequence
   file: test.seq
   metadata_directory: resources/metadata
+  coordinate_mode: XYZ-in-TRA
   orientation: COR
   rf_direction: LR
+  rf_profile:
+    center_shift_mm: 0.0
   contrast:
     model: bssfp
     tissue_library: test-tissues
@@ -46,21 +49,21 @@ timeline:
   xcat_to_kspace: average
 
 phantom:
-  orientation: SAG
+  patient_position: HFS
   anatomy:
     sex: male
     papillary_muscles: false
   voxel_size_mm: [1.0, 1.0, 1.0]
   matrix_size_xy: 64
-  slice_range:
+  head_foot_slice_range:
     start: 10
     end: 20
+  in_plane_crop:
+    right_left: null
+    anterior_posterior: null
   transform:
     additional_rotation_deg_xyz: [0.0, 0.0, 0.0]
     translation_mm_xyz: [0.0, 0.0, 0.0]
-  crop:
-    rows: [0, 64]
-    columns: [0, 64]
   motion:
     mode: breath-hold
     cardiac:
@@ -99,6 +102,8 @@ intervention:
 coils:
   enabled: false
   sensitivity_map: null
+  coordinate_frame: DCS
+  axis_order: [X, Y, Z]
   normalize: false
 
 undersampling:

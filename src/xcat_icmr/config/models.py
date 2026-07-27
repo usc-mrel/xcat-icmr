@@ -65,12 +65,18 @@ class ContrastConfig(ConfigModel):
     tissue_library: str = Field(min_length=1)
 
 
+class RfProfileConfig(ConfigModel):
+    center_shift_mm: float = Field(default=0.0, allow_inf_nan=False)
+
+
 class SequenceConfig(ConfigModel):
     folder: Path
     file: Path
     metadata_directory: Path
-    orientation: Literal["COR", "SAG", "TRA", "2D"]
+    coordinate_mode: Literal["XYZ-in-TRA"]
+    orientation: Literal["COR", "SAG", "TRA"]
     rf_direction: Literal["LR", "AP", "SI"]
+    rf_profile: RfProfileConfig = Field(default_factory=RfProfileConfig)
     contrast: ContrastConfig
 
     @property
@@ -131,21 +137,6 @@ class TransformConfig(ConfigModel):
     translation_mm_xyz: tuple[float, float, float]
 
 
-class CropConfig(ConfigModel):
-    rows: tuple[int, int]
-    columns: tuple[int, int]
-
-    @model_validator(mode="after")
-    def validate_ranges(self) -> "CropConfig":
-        for name, values in (("rows", self.rows), ("columns", self.columns)):
-            start, stop = values
-            if start < 0:
-                raise ValueError(f"{name} start must be non-negative")
-            if stop <= start:
-                raise ValueError(f"{name} stop must be greater than start")
-        return self
-
-
 class CardiacMotionConfig(ConfigModel):
     heart_rate_bpm: PositiveFloat
     start_phase: float = Field(ge=0.0, le=1.0)
@@ -176,14 +167,40 @@ class MotionConfig(ConfigModel):
         return self
 
 
+class InPlaneCropConfig(ConfigModel):
+    """Optional 1-based, inclusive MATLAB index ranges in patient axes."""
+
+    right_left: tuple[int, int] | None
+    anterior_posterior: tuple[int, int] | None
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> "InPlaneCropConfig":
+        for name, values in (
+            ("right_left", self.right_left),
+            ("anterior_posterior", self.anterior_posterior),
+        ):
+            if values is None:
+                continue
+            start, end = values
+            if start < 1:
+                raise ValueError(
+                    f"{name} start must be at least 1 for MATLAB indexing"
+                )
+            if end < start:
+                raise ValueError(
+                    f"{name} end must be greater than or equal to start"
+                )
+        return self
+
+
 class PhantomConfig(ConfigModel):
-    orientation: Literal["COR", "SAG", "TRA", "SAX"]
+    patient_position: Literal["HFS"]
     anatomy: AnatomyConfig
     voxel_size_mm: tuple[PositiveFloat, PositiveFloat, PositiveFloat]
     matrix_size_xy: int = Field(gt=0)
-    slice_range: SliceRangeConfig
+    head_foot_slice_range: SliceRangeConfig
+    in_plane_crop: InPlaneCropConfig
     transform: TransformConfig
-    crop: CropConfig
     motion: MotionConfig
 
 
@@ -236,7 +253,19 @@ class InterventionConfig(ConfigModel):
 class CoilsConfig(ConfigModel):
     enabled: bool
     sensitivity_map: Path | None
+    coordinate_frame: Literal["DCS"]
+    axis_order: tuple[
+        Literal["X", "Y", "Z"],
+        Literal["X", "Y", "Z"],
+        Literal["X", "Y", "Z"],
+    ]
     normalize: bool
+
+    @model_validator(mode="after")
+    def validate_axis_order(self) -> "CoilsConfig":
+        if set(self.axis_order) != {"X", "Y", "Z"}:
+            raise ValueError("axis_order must contain X, Y, and Z exactly once")
+        return self
 
 
 class UndersamplingConfig(ConfigModel):

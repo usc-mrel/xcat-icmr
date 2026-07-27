@@ -69,6 +69,7 @@ def make_config(tmp_path: Path, orientation: str = "COR") -> SequenceConfig:
         folder=sequence_dir,
         file=Path("test.seq"),
         metadata_directory=metadata_dir,
+        coordinate_mode="XYZ-in-TRA",
         orientation=orientation,
         rf_direction="LR",
         contrast=ContrastConfig(model="bssfp", tissue_library="test"),
@@ -89,14 +90,19 @@ def test_rejects_invalid_signature(tmp_path: Path) -> None:
         read_pulseq_signature(path)
 
 
-def test_reads_metadata_and_applies_cor_mapping(tmp_path: Path) -> None:
+def test_preserves_logical_metadata_and_derives_cor_dcs_mapping(
+    tmp_path: Path,
+) -> None:
     config = make_config(tmp_path, orientation="COR")
     data = read_sequence(config)
     base = np.arange(12, dtype=np.float64).reshape(3, 4)
 
-    np.testing.assert_array_equal(data.kx, base + 100)
-    np.testing.assert_array_equal(data.ky, base + 200)
-    np.testing.assert_array_equal(data.kz, base)
+    np.testing.assert_array_equal(data.logical_kx, base)
+    np.testing.assert_array_equal(data.logical_ky, base + 100)
+    np.testing.assert_array_equal(data.logical_kz, base + 200)
+    np.testing.assert_array_equal(data.dcs_kx, base + 100)
+    np.testing.assert_array_equal(data.dcs_ky, base + 200)
+    np.testing.assert_array_equal(data.dcs_kz, base)
     np.testing.assert_allclose(data.fov_mm, [280, 200, 160])
     np.testing.assert_allclose(data.resolution_mm, [2.5])
     assert data.trajectory_shape == (3, 4)
@@ -116,9 +122,9 @@ def test_matlab_reference_comparison_is_exact(tmp_path: Path) -> None:
         seq.create_dataset("TR", data=np.asarray([[data.tr_ms]]))
         seq.create_dataset("FOV", data=data.fov_mm[:, None])
         seq.create_dataset("res", data=data.resolution_mm[:, None])
-        seq.create_dataset("kx", data=data.kx.T)
-        seq.create_dataset("ky", data=data.ky.T)
-        seq.create_dataset("kz", data=data.kz.T)
+        seq.create_dataset("kx", data=data.dcs_kx.T)
+        seq.create_dataset("ky", data=data.dcs_ky.T)
+        seq.create_dataset("kz", data=data.dcs_kz.T)
         metadata = seq.create_group("metadata")
         metadata.create_dataset("w", data=data.density_compensation.T)
 

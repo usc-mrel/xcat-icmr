@@ -60,6 +60,7 @@ def test_loads_valid_configuration_and_resolves_paths(tmp_path: Path) -> None:
         path.parent / "resources" / "sequence" / "test.seq"
     )
     assert config.timeline.xcat_frames_per_kspace_frame == 10
+    assert config.sequence.rf_profile.center_shift_mm == 0.0
 
 
 def test_expands_environment_variables(

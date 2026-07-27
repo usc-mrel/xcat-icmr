@@ -30,12 +30,18 @@ def write_binary(path: Path, logical: np.ndarray) -> None:
 
 def make_logical(config: SimulationConfig) -> np.ndarray:
     matrix = config.phantom.matrix_size_xy
-    slices = config.phantom.slice_range.end - config.phantom.slice_range.start + 1
+    slices = (
+        config.phantom.head_foot_slice_range.end
+        - config.phantom.head_foot_slice_range.start
+        + 1
+    )
     values = np.arange(matrix * matrix * slices, dtype=np.int64) % 72
     return values.reshape((matrix, matrix, slices), order="F").astype(np.float32)
 
 
-def test_memory_maps_matlab_column_major_shape_and_crop(tmp_path: Path) -> None:
+def test_memory_maps_matlab_column_major_shape_without_in_plane_crop(
+    tmp_path: Path,
+) -> None:
     config = make_config()
     logical = make_logical(config)
     path = tmp_path / "frame.bin"
@@ -56,6 +62,23 @@ def test_rejects_binary_with_wrong_size(tmp_path: Path) -> None:
 
     with pytest.raises(XcatBinaryReadError, match="expected"):
         open_xcat_binary(make_config(), path)
+
+
+def test_applies_matlab_style_in_plane_crop(tmp_path: Path) -> None:
+    config = make_config()
+    config.phantom.in_plane_crop.right_left = (3, 9)
+    config.phantom.in_plane_crop.anterior_posterior = (4, 12)
+    logical = make_logical(config)
+    path = tmp_path / "frame.bin"
+    write_binary(path, logical)
+
+    volume = open_xcat_binary(config, path)
+
+    assert volume.cropped_shape == (7, 9, 11)
+    np.testing.assert_array_equal(
+        volume.cropped,
+        logical[2:9, 3:12, :],
+    )
 
 
 def test_compares_reversed_matlab_hdf5_axes_exactly(tmp_path: Path) -> None:
