@@ -29,7 +29,15 @@ resources:
 # naming conventions are internal XCAT-iCMR defaults.
 outputs:
   save_tissue_labels: true
-  save_contrast_images: true
+  # Export the complete PCS label cycle as one uint16 4-D NRRD for 3D Slicer.
+  save_tissue_labels_nrrd: true
+  # Select one verified label frame every 50 ms (every tenth 5 ms frame).
+  tissue_labels_nrrd_time_step_s: 0.050
+  # High-resolution contrast on the cropped 1 mm XCAT grid.
+  save_gt_contrast: true
+  # Coarser trajectory-resolution contrast reconstructed from fully sampled
+  # simulated k-space. This output is implemented with the production k-space stage.
+  save_fullysampled_contrast: true
   save_fully_sampled_kspace: true
   retain_xcat_binary_files: false
 
@@ -57,11 +65,12 @@ sequence:
   # sequence metadata.
   coordinate_mode: XYZ-in-TRA
   orientation: COR
-  rf_direction: LR
   rf_profile:
-    # Signed patient-coordinate displacement: positive LR is toward Left.
+    # Signed displacement along the RF-selection direction, which is derived
+    # from the Pulseq gradient channel and coordinate transforms. For this
+    # sequence it maps to +Sag (LR, toward Left).
     # The selection gradient and phantom remain fixed; only RF phase is shifted.
-    center_shift_mm: 20.0
+    center_shift_mm: 15.0
 
   contrast:
     model: bssfp
@@ -71,8 +80,9 @@ sequence:
 # Simulation timeline
 # -------------------------------------------------------------------------------------------------
 timeline:
-  # "auto" ends a balloon simulation when the balloon reaches the final
-  # control point. Use a number of seconds when a fixed duration is required.
+  # "auto" is the time required to traverse the complete cubic Gd path at
+  # the internal reference speed of 0.5 cm/s. This is independent of the
+  # configured balloon movement velocity below. Use a number for fixed time.
   duration_s: auto
 
   # XCAT anatomy is generated more frequently than the expensive k-space
@@ -135,7 +145,7 @@ intervention:
     enabled: true
 
     path:
-      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418.json
+      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_extended_reversed.json
       format: 3d-slicer-markups
       coordinate_system: auto
       interpolation: cubic-arc-length
@@ -143,9 +153,12 @@ intervention:
     movement:
       velocity_cm_per_s: 0.5
       start_time_s: 0.0
+      traversal: one-way  # one-way | round-trip
 
     geometry:
       shape: ellipsoid
+      # A spherical balloon with 5 mm radius. The legacy
+      # gen_cath_kspace.py sphere used a 3.5 mm radius (7 mm diameter).
       diameter_mm: [10.0, 10.0, 10.0]
 
     contrast_agent:
@@ -157,7 +170,7 @@ intervention:
       relaxivity_library: gd-default
 
     composition:
-      mode: additive
+      mode: replace-background
 
 # -------------------------------------------------------------------------------------------------
 # Coils, undersampling, and noise

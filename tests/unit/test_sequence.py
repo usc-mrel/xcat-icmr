@@ -71,7 +71,6 @@ def make_config(tmp_path: Path, orientation: str = "COR") -> SequenceConfig:
         metadata_directory=metadata_dir,
         coordinate_mode="XYZ-in-TRA",
         orientation=orientation,
-        rf_direction="LR",
         contrast=ContrastConfig(model="bssfp", tissue_library="test"),
     )
 

@@ -298,6 +298,11 @@ def format_rf_profile_contrast_generation(
 ) -> str:
     """Format the sole verified spatially varying-FA bSSFP output."""
 
+    rf_direction = {
+        "Sag": "LR",
+        "Cor": "AP",
+        "Tra": "SI",
+    }[report.patient_direction[1:]]
     return "\n".join(
         (
             "Pulseq RF-profile bSSFP contrast",
@@ -305,7 +310,10 @@ def format_rf_profile_contrast_generation(
             f"Image shape:             {report.image_shape}",
             f"RF logical axis:         {report.logical_axis} (zero-based)",
             f"Applied PCS axis:        {report.pcs_axis} (zero-based)",
-            f"Patient direction:       {report.patient_direction}",
+            (
+                "Patient direction:       "
+                f"{rf_direction} ({report.patient_direction})"
+            ),
             f"RF center shift:         {report.center_shift_mm:g} mm",
             f"Full logical profile:    {report.full_profile_length} samples",
             f"Applied cropped profile: {report.applied_profile_length} samples",

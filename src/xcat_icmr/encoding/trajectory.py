@@ -90,7 +90,8 @@ def prepare_encoding_grids(
         allow_scalar=True,
     )
     acquisition_fov = np.asarray(ground_truth_shape) * voxel
-    acquisition_shape = np.floor(acquisition_fov / resolution).astype(int)
+    acquisition_shape = np.ceil(acquisition_fov / resolution).astype(int)
+    acquisition_shape += acquisition_shape % 2
     if np.any(acquisition_shape <= 0):
         raise TrajectoryPreparationError(
             "FOV and resolution produced a non-positive encoding matrix"
@@ -106,6 +107,43 @@ def prepare_encoding_grids(
         ),
         resolution_mm=tuple(float(value) for value in resolution),
     )
+
+
+def scale_isotropic_trajectory_to_resolution(
+    kx_per_m: np.ndarray,
+    ky_per_m: np.ndarray,
+    kz_per_m: np.ndarray,
+    *,
+    resolution_mm: float,
+) -> tuple[tuple[np.ndarray, np.ndarray, np.ndarray], float, float]:
+    """Scale a 3-D trajectory shape to a user-selected isotropic resolution."""
+
+    components = tuple(
+        np.asarray(values, dtype=np.float64)
+        for values in (kx_per_m, ky_per_m, kz_per_m)
+    )
+    if len({values.shape for values in components}) != 1 or components[0].ndim != 2:
+        raise TrajectoryPreparationError(
+            "kx, ky, and kz must have matching [sample, arm] shapes"
+        )
+    if not all(np.all(np.isfinite(values)) for values in components):
+        raise TrajectoryPreparationError(
+            "trajectory coordinates contain non-finite values"
+        )
+    if not np.isfinite(resolution_mm) or resolution_mm <= 0:
+        raise TrajectoryPreparationError(
+            "trajectory resolution must be positive and finite"
+        )
+    radius = np.sqrt(sum(values**2 for values in components))
+    source_radius = float(np.max(radius))
+    if source_radius <= 0:
+        raise TrajectoryPreparationError("trajectory has zero radial extent")
+    target_radius = 1.0 / (2.0 * resolution_mm * 1e-3)
+    scale = target_radius / source_radius
+    scaled = tuple(
+        np.asarray(values * scale, dtype=np.float64) for values in components
+    )
+    return scaled, float(scale), float(target_radius)
 
 
 def prepare_sigpy_trajectory(
@@ -176,6 +214,84 @@ def prepare_sigpy_trajectory(
             raise TrajectoryPreparationError(
                 f"trajectory axis {axis} exceeds the grid Nyquist range: "
                 f"{maximum:g} > {size / 2:g}"
+            )
+
+    return EncodingTrajectory(
+        coordinates=coordinates,
+        sample_count=sample_count,
+        arm_count=int(selected.size),
+        matrix_shape=matrix_shape,
+        source_maximum_absolute_k_per_m=source_maxima,
+        maximum_absolute_coordinate=maxima,
+    )
+
+
+def prepare_physical_sigpy_trajectory(
+    kx_per_m: np.ndarray,
+    ky_per_m: np.ndarray,
+    kz_per_m: np.ndarray,
+    *,
+    fov_mm: tuple[float, float, float],
+    matrix_shape: tuple[int, int, int],
+    arm_indices: np.ndarray | None = None,
+) -> EncodingTrajectory:
+    """Map physical cycles/metre to SigPy coordinates via ``k * FOV``."""
+
+    components = tuple(
+        np.asarray(values, dtype=np.float64)
+        for values in (kx_per_m, ky_per_m, kz_per_m)
+    )
+    shapes = {values.shape for values in components}
+    if len(shapes) != 1 or components[0].ndim != 2:
+        raise TrajectoryPreparationError(
+            "kx, ky, and kz must have matching [sample, arm] shapes"
+        )
+    if not all(np.all(np.isfinite(values)) for values in components):
+        raise TrajectoryPreparationError(
+            "trajectory coordinates contain non-finite values"
+        )
+    physical_fov = _three_finite_positive(fov_mm, name="fov_mm")
+    if len(matrix_shape) != 3 or any(value <= 0 for value in matrix_shape):
+        raise TrajectoryPreparationError(
+            "matrix_shape must contain three positive dimensions"
+        )
+
+    sample_count, full_arm_count = components[0].shape
+    if arm_indices is None:
+        selected = np.arange(full_arm_count, dtype=np.intp)
+    else:
+        selected = np.asarray(arm_indices, dtype=np.intp)
+        if selected.ndim != 1 or selected.size == 0:
+            raise TrajectoryPreparationError(
+                "arm_indices must be a non-empty one-dimensional array"
+            )
+        if np.any(selected < 0) or np.any(selected >= full_arm_count):
+            raise TrajectoryPreparationError(
+                f"arm_indices must be between 0 and {full_arm_count - 1}"
+            )
+
+    source_maxima = tuple(
+        float(np.max(np.abs(values))) for values in components
+    )
+    coordinates = np.column_stack(
+        [
+            values[:, selected].T.reshape(-1) * (axis_fov_mm * 1e-3)
+            for values, axis_fov_mm in zip(
+                components, physical_fov, strict=True
+            )
+        ]
+    ).astype(np.float32)
+    maxima = tuple(
+        float(np.max(np.abs(coordinates[:, axis])))
+        for axis in range(3)
+    )
+    for axis, (maximum, size) in enumerate(
+        zip(maxima, matrix_shape, strict=True)
+    ):
+        if maximum > size / 2 + 1e-5:
+            raise TrajectoryPreparationError(
+                f"physical trajectory axis {axis} exceeds the grid Nyquist "
+                f"range: {maximum:g} > {size / 2:g}"
             )
 
     return EncodingTrajectory(

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from xcat_icmr.cli import _prepare_resumed_xcat_invocation, build_parser
 from xcat_icmr.config.models import SimulationConfig
 from xcat_icmr.phantom import (
     XcatExecutionError,
@@ -332,3 +333,92 @@ def test_streaming_execution_refuses_partial_leftover(
             report,
             lambda frame: None,
         )
+
+
+def test_streaming_force_generate_bypasses_existing_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config)
+    assert frames.frames[0].label_path is not None
+    frames.frames[0].label_path.parent.mkdir(parents=True, exist_ok=True)
+    frames.frames[0].label_path.touch()
+    report = preflight_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        allow_partial_outputs=True,
+    )
+
+    def launched(*args, **kwargs):
+        raise RuntimeError("XCAT launch attempted")
+
+    monkeypatch.setattr("xcat_icmr.phantom.runner.subprocess.Popen", launched)
+
+    with pytest.raises(RuntimeError, match="XCAT launch attempted"):
+        execute_streaming_xcat_invocation(
+            config,
+            frames,
+            report,
+            lambda frame: None,
+            force_generate=True,
+        )
+
+
+def test_resume_plan_starts_at_missing_global_phase(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    parameters, frames = prepare(config, debug_one_frame=False)
+
+    resumed_parameters, resumed_frames = _prepare_resumed_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        first_missing_zero_based=100,
+    )
+
+    assert resumed_parameters.parameters["out_frames"] == 100
+    assert resumed_parameters.parameters["hrt_start_ph_index"] == 0.5
+    assert resumed_parameters.parameters["resp_start_ph_index"] == pytest.approx(0.4)
+    assert len(resumed_frames.frames) == 100
+    assert resumed_frames.frames[0].index == 101
+    assert resumed_frames.frames[-1].index == 200
+    assert resumed_frames.frames[0].binary_path.name.endswith("_act_1.bin")
+    assert resumed_frames.frames[-1].binary_path.name.endswith("_act_100.bin")
+
+
+def test_free_breathing_resume_compensates_xcat_heart_time_offset(
+    tmp_path: Path,
+) -> None:
+    config = make_runtime(tmp_path)
+    config.phantom.motion.mode = "free-breathing"
+    config.phantom.motion.respiratory.breaths_per_minute = 12
+    parameters, frames = prepare(config, debug_one_frame=False)
+
+    resumed_parameters, resumed_frames = _prepare_resumed_xcat_invocation(
+        config,
+        parameters,
+        frames,
+        first_missing_zero_based=100,
+    )
+
+    assert resumed_parameters.parameters["out_frames"] == 900
+    assert resumed_parameters.parameters["hrt_start_ph_index"] == 0.5
+    assert resumed_parameters.parameters["resp_start_ph_index"] == pytest.approx(0.4)
+    assert resumed_frames.frames[0].index == 101
+    assert resumed_frames.frames[-1].index == 1000
+
+
+def test_dynamic_cycle_cli_accepts_regeneration_start_frame() -> None:
+    args = build_parser().parse_args(
+        [
+            "generate-dynamic-cycle",
+            "simulation.yaml",
+            "--regenerate-from-frame",
+            "102",
+        ]
+    )
+
+    assert args.regenerate_from_frame == 102

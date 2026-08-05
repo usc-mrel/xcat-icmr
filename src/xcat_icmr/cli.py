@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import sys
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 from pydantic import ValidationError
-from scipy.io import whosmat
+from scipy.io import loadmat, whosmat
+
+from xcat_icmr.cache import stage_reuse_status, write_stage_manifest
 
 from xcat_icmr.coils import (
     SensitivityMapError,
@@ -31,20 +34,46 @@ from xcat_icmr.encoding import (
     EncodingInputError,
     NufftBackendError,
     TrajectoryPreparationError,
+    format_fov_psf_diagnostic,
+    format_multicoil_nufft_debug,
     format_reduced_nufft_validation,
     format_logical_input_preview,
     format_sigpy_reference_validation,
     format_prepared_contrast,
+    compare_device_references,
     prepare_contrast_for_encoding,
     prepare_encoding_grids,
+    measure_centered_signal_support,
+    run_fov_psf_diagnostic,
+    run_multicoil_nufft_debug,
     run_reduced_nufft_validation,
+    scale_isotropic_trajectory_to_resolution,
     save_logical_input_preview,
     validate_sigpy_reference,
+    validate_image_reference,
 )
 from xcat_icmr.exporting import (
     NrrdExportError,
     export_contrast_series_nrrd,
+    export_label_series_nrrd,
     format_nrrd_export,
+)
+from xcat_icmr.intervention import (
+    BalloonPathError,
+    GdSignalError,
+    SparseBalloonError,
+)
+from xcat_icmr.intervention.debug import (
+    BalloonDebugError,
+    format_balloon_debug,
+    format_balloon_path_debug,
+    generate_balloon_debug_frames,
+    generate_balloon_path_debug,
+)
+from xcat_icmr.intervention.encoding_debug import (
+    BalloonEncodingDebugError,
+    format_balloon_encoding_debug,
+    validate_balloon_kspace_linearity,
 )
 from xcat_icmr import __version__
 from xcat_icmr.phantom import (
@@ -69,7 +98,10 @@ from xcat_icmr.phantom import (
     preflight_xcat_invocation,
     execute_xcat_invocation,
     execute_streaming_xcat_invocation,
+    render_xcat_parameter_file,
 )
+from xcat_icmr.phantom.frames import XcatFramePlan
+from xcat_icmr.phantom.parameters import XcatParameterFile
 from xcat_icmr.sequence import (
     MatlabReferenceError,
     OrientationTransformError,
@@ -110,6 +142,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="validate a simulation YAML file without running the simulation",
     )
     validate_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+
+    reuse_parser = subparsers.add_parser(
+        "inspect-reuse",
+        help="report whether labels, contrast, and k-space can be reused",
+    )
+    reuse_parser.add_argument(
         "configuration",
         type=Path,
         help="path to a simulation YAML file",
@@ -265,6 +307,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="number of label/contrast slices processed per chunk",
     )
+    dynamic_cycle_parser.add_argument(
+        "--regenerate-from-frame",
+        type=int,
+        metavar="N",
+        help=(
+            "regenerate and replace labels and contrasts from one-based "
+            "frame N through the end of the motion cycle"
+        ),
+    )
 
     compare_xcat_labels_parser = subparsers.add_parser(
         "compare-xcat-labels",
@@ -382,6 +433,62 @@ def build_parser() -> argparse.ArgumentParser:
         help="replace an existing 4-D NRRD",
     )
 
+    export_label_nrrd_parser = subparsers.add_parser(
+        "export-labels-nrrd",
+        help="stream the complete tissue-label cycle into one uint16 4-D NRRD",
+    )
+    export_label_nrrd_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    export_label_nrrd_parser.add_argument(
+        "--output",
+        type=Path,
+        help="output NRRD path (default: run exports directory)",
+    )
+    export_label_nrrd_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing tissue-label NRRD",
+    )
+
+    balloon_debug_parser = subparsers.add_parser(
+        "generate-balloon-debug",
+        help="save representative high-resolution tissue/Gd replacement frames",
+    )
+    balloon_debug_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    balloon_debug_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing balloon debug frames",
+    )
+
+    balloon_path_debug_parser = subparsers.add_parser(
+        "generate-balloon-path-debug",
+        help="save the complete swept A-to-B balloon path in one anatomy frame",
+    )
+    balloon_path_debug_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    balloon_path_debug_parser.add_argument(
+        "--center-spacing-mm",
+        type=float,
+        default=0.5,
+        help="distance between swept-path balloon centres (default: 0.5 mm)",
+    )
+    balloon_path_debug_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing complete-path debug frame",
+    )
+
     prepare_kspace_inputs_parser = subparsers.add_parser(
         "prepare-kspace-inputs",
         help="validate and normalize coil/image inputs before NUFFT",
@@ -411,6 +518,109 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="coil index in the prepared file (default: 0)",
+    )
+    validate_sigpy_parser.add_argument(
+        "--device-id",
+        type=int,
+        help="override YAML device ID (-1 CPU; 0, 1, ... GPU)",
+    )
+
+    multicoil_debug_parser = subparsers.add_parser(
+        "generate-kspace-all-coils-debug",
+        help="run the full 3-D trajectory for every coil and save RSS adjoint",
+    )
+    multicoil_debug_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+
+    balloon_kspace_debug_parser = subparsers.add_parser(
+        "generate-balloon-kspace-debug",
+        help=(
+            "encode the frame-1 tissue/Gd balloon image with all coils and "
+            "save its RSS adjoint"
+        ),
+    )
+    balloon_kspace_debug_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+
+    balloon_linearity_parser = subparsers.add_parser(
+        "validate-balloon-kspace-linearity",
+        help="compare full-image NUFFT with tissue plus sparse Gd-delta NUFFT",
+    )
+    balloon_linearity_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+
+    parity_parser = subparsers.add_parser(
+        "compare-nufft-devices",
+        help="compare saved CPU and GPU forward/adjoint references",
+    )
+    parity_parser.add_argument("cpu_reference", type=Path)
+    parity_parser.add_argument("gpu_reference", type=Path)
+    parity_parser.add_argument("--output", type=Path, required=True)
+
+    image_validation_parser = subparsers.add_parser(
+        "validate-kspace-reference",
+        help="compare shifted high-resolution GT with an all-coil RSS adjoint",
+    )
+    image_validation_parser.add_argument("shifted_gt", type=Path)
+    image_validation_parser.add_argument("multicoil_reference", type=Path)
+    image_validation_parser.add_argument("--output", type=Path, required=True)
+
+    fov_diagnostic_parser = subparsers.add_parser(
+        "diagnose-kspace-fov",
+        help="generate an impulse PSF and compare fixed reconstruction FOVs",
+    )
+    fov_diagnostic_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--coil",
+        type=int,
+        default=0,
+        help="coil index of the saved tissue k-space (default: 0)",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--kspace",
+        type=Path,
+        help="existing debug MAT file containing kspace",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--support-threshold",
+        type=float,
+        default=0.01,
+        help="relative magnitude used to measure object support (default: 0.01)",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--support-margin-mm",
+        type=float,
+        default=10.0,
+        help="margin added on both sides of measured support (default: 10)",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--device-id",
+        type=int,
+        default=-1,
+        help="-1 for CPU or a non-negative CuPy GPU ID (default: -1)",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--output",
+        type=Path,
+        help="diagnostic MAT output path",
+    )
+    fov_diagnostic_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace an existing diagnostic MAT file",
     )
     return parser
 
@@ -684,10 +894,10 @@ def _generate_contrast(
 ) -> int:
     try:
         config = load_config(configuration)
-        if not config.outputs.save_contrast_images:
+        if not config.outputs.save_gt_contrast:
             raise ContrastGenerationError(
-                "outputs.save_contrast_images is false; enable it to write "
-                "contrast images"
+                "outputs.save_gt_contrast is false; enable it to write "
+                "high-resolution XCAT contrast images"
             )
         sequence = read_sequence(config.sequence)
         library = get_tissue_library(
@@ -899,21 +1109,6 @@ def _generate_spatially_varying_fa_contrast(
         )
         excitation = read_pulseq_excitation(sequence.sequence_path)
         logical_axis = excitation.logical_axis
-        patient_direction = (
-            transforms.logical_axis_patient_directions[logical_axis]
-        )
-        expected_rf_direction = {
-            "Sag": "LR",
-            "Cor": "AP",
-            "Tra": "SI",
-        }[patient_direction[1:]]
-        if expected_rf_direction != config.sequence.rf_direction:
-            raise SliceProfileError(
-                "Pulseq RF gradient and sequence.rf_direction disagree: "
-                f"logical {excitation.gradient_channel} maps to "
-                f"{patient_direction} ({expected_rf_direction}), but YAML "
-                f"declares {config.sequence.rf_direction}"
-            )
         if not np.isclose(
             excitation.nominal_flip_angle_deg,
             sequence.flip_angle_deg,
@@ -1011,7 +1206,7 @@ def _generate_spatially_varying_fa_contrast(
 def _mat_variable_matches(
     path: Path,
     variable_name: str,
-    expected_shape: tuple[int, int, int],
+    expected_shape: tuple[int, ...],
 ) -> bool:
     """Check a saved frame without loading its complete voxel array."""
 
@@ -1027,10 +1222,155 @@ def _mat_variable_matches(
     return entries.get(variable_name) == (expected_shape, "single")
 
 
+def _prepare_resumed_xcat_invocation(
+    config,
+    parameters: XcatParameterFile,
+    frames: XcatFramePlan,
+    *,
+    first_missing_zero_based: int,
+) -> tuple[XcatParameterFile, XcatFramePlan]:
+    """Start XCAT at the first missing phase and map local outputs globally."""
+
+    remaining = len(frames.frames) - first_missing_zero_based
+    if remaining <= 0:
+        raise XcatFramePlanError("resume plan has no missing frames")
+    start_time_s = frames.frames[first_missing_zero_based].time_s
+    values = dict(parameters.parameters)
+    cardiac_period_s = 60.0 / config.phantom.motion.cardiac.heart_rate_bpm
+    values["hrt_start_ph_index"] = (
+        config.phantom.motion.cardiac.start_phase
+        + start_time_s / cardiac_period_s
+    ) % 1.0
+    respiratory = config.phantom.motion.respiratory
+    xcat_start_time_s = values["hrt_start_ph_index"] * cardiac_period_s
+    respiratory_period_s = float(values["resp_period"])
+    if config.phantom.motion.mode == "free-breathing":
+        if respiratory.breaths_per_minute is None:
+            raise XcatFramePlanError(
+                "free-breathing resume requires breaths_per_minute"
+            )
+        desired_respiratory_phase = (
+            respiratory.start_phase
+            + start_time_s / respiratory_period_s
+        ) % 1.0
+        # With respiratory motion enabled, XCAT advances both clocks by the
+        # heart start-time offset. Back out that offset so the resumed first
+        # frame lands on the desired global respiratory phase.
+        values["resp_start_ph_index"] = (
+            desired_respiratory_phase
+            - xcat_start_time_s / respiratory_period_s
+        ) % 1.0
+    else:
+        # XCAT keeps the respiratory phase fixed for beating-heart-only
+        # (breath-hold) runs, independent of hrt_start_ph_index.
+        values["resp_start_ph_index"] = respiratory.start_phase
+    values["out_frames"] = remaining
+
+    file_values = {
+        name: value
+        for name, value in values.items()
+        if name not in parameters.command_line_parameters
+    }
+    template_text = parameters.template_path.read_text(encoding="utf-8")
+    rendered, appended = render_xcat_parameter_file(
+        template_text, file_values
+    )
+    resume_directory = (
+        config.run.output_root
+        / "xcat"
+        / "resume"
+        / f"from_{first_missing_zero_based + 1:04d}"
+    )
+    resume_directory.mkdir(parents=True, exist_ok=True)
+    parameter_path = resume_directory / "parameters.par"
+    parameter_path.write_text(rendered, encoding="utf-8")
+    motion = replace(
+        parameters.motion_plan,
+        generated_frame_count=remaining,
+        debug_one_frame=False,
+    )
+    resumed_parameters = replace(
+        parameters,
+        output_path=parameter_path,
+        motion_plan=motion,
+        parameters=values,
+        appended_parameters=appended,
+    )
+
+    output_prefix = (
+        resume_directory
+        / f"phantom_{config.run.id}_from_{first_missing_zero_based + 1:04d}"
+    )
+    resumed_frames = tuple(
+        replace(
+            global_frame,
+            binary_path=(
+                resume_directory
+                / f"{output_prefix.name}_act_{local_index}.bin"
+            ),
+            binary_exists=False,
+        )
+        for local_index, global_frame in enumerate(
+            frames.frames[first_missing_zero_based:], start=1
+        )
+    )
+    resumed_plan = replace(
+        frames,
+        raw_directory=resume_directory,
+        output_prefix=output_prefix,
+        motion=motion,
+        frames=resumed_frames,
+    )
+    return resumed_parameters, resumed_plan
+
+
+def _write_dynamic_stage_manifests(config, frames: XcatFramePlan) -> None:
+    """Record the verified label and tissue-contrast products independently."""
+
+    label_paths = []
+    contrast_paths = []
+    for frame in frames.frames:
+        if frame.label_path is None:
+            raise XcatFramePlanError(
+                f"frame {frame.index} has no label path for manifest"
+            )
+        label_paths.append(frame.label_path)
+        contrast_paths.append(
+            config.run.output_root
+            / "contrast"
+            / (
+                f"phantom_{config.run.id}_act_{frame.index}_"
+                f"{config.sequence.contrast.model}.mat"
+            )
+        )
+    write_stage_manifest(config, "labels", label_paths)
+    write_stage_manifest(config, "contrast", contrast_paths)
+
+
+def _inspect_reuse(configuration: Path) -> int:
+    """Print stage-level cache validity without loading simulation arrays."""
+
+    try:
+        config = load_config(configuration)
+        print("Simulation stage reuse")
+        for stage in ("labels", "contrast", "fullysampled_kspace"):
+            status = stage_reuse_status(config, stage)
+            state = "REUSE" if status.reusable else "REGENERATE"
+            print(f"{stage:24s} {state:10s} {status.reason}")
+            print(f"  manifest: {status.manifest_path}")
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    return 2
+
+
 def _generate_dynamic_cycle(
     configuration: Path,
     *,
     chunk_slices: int,
+    regenerate_from_frame: int | None = None,
 ) -> int:
     """Generate, consume, and clean one complete XCAT motion cycle."""
 
@@ -1040,9 +1380,9 @@ def _generate_dynamic_cycle(
             raise XcatLabelConversionError(
                 "streaming generation requires save_tissue_labels: true"
             )
-        if not config.outputs.save_contrast_images:
+        if not config.outputs.save_gt_contrast:
             raise RfProfileContrastError(
-                "streaming generation requires save_contrast_images: true"
+                "streaming generation requires save_gt_contrast: true"
             )
         if config.scanner.effects.off_resonance.enabled:
             raise NotImplementedError(
@@ -1058,15 +1398,14 @@ def _generate_dynamic_cycle(
             config, debug_one_frame=False
         )
         frames = plan_xcat_frames(config, debug_one_frame=False)
-        preflight = preflight_xcat_invocation(
-            config,
-            parameters,
-            frames,
-            allow_partial_outputs=True,
-        )
-        if not preflight.passed:
-            print(format_xcat_preflight(preflight, dry_run=False))
-            return 2
+        total = len(frames.frames)
+        if regenerate_from_frame is not None and not (
+            1 <= regenerate_from_frame <= total
+        ):
+            raise XcatFramePlanError(
+                "--regenerate-from-frame must be between 1 and "
+                f"{total}; got {regenerate_from_frame}"
+            )
 
         sequence = read_sequence(config.sequence)
         transforms = build_coordinate_transforms(
@@ -1082,20 +1421,6 @@ def _generate_dynamic_cycle(
         )
         excitation = read_pulseq_excitation(sequence.sequence_path)
         logical_axis = excitation.logical_axis
-        patient_direction = (
-            transforms.logical_axis_patient_directions[logical_axis]
-        )
-        expected_rf_direction = {
-            "Sag": "LR",
-            "Cor": "AP",
-            "Tra": "SI",
-        }[patient_direction[1:]]
-        if expected_rf_direction != config.sequence.rf_direction:
-            raise SliceProfileError(
-                "Pulseq RF gradient maps to "
-                f"{patient_direction} ({expected_rf_direction}), but YAML "
-                f"declares {config.sequence.rf_direction}"
-            )
         pcs_voxel = np.asarray(
             config.phantom.voxel_size_mm, dtype=np.float64
         )
@@ -1115,44 +1440,20 @@ def _generate_dynamic_cycle(
         library = get_tissue_library(
             config.sequence.contrast.tissue_library
         )
-        # The small shared profile is conservatively rewritten on the first
-        # generated frame; label and contrast frames remain independently
-        # resumable.
-        profile_written = False
-        total = len(frames.frames)
+        profile_written = _mat_variable_matches(
+            profile_path,
+            "effective_flip_angle_deg",
+            (1, logical_shape[logical_axis]),
+        )
         reused_labels = 0
         reused_contrasts = 0
 
-        def consume(frame) -> None:
-            nonlocal profile_written, reused_labels, reused_contrasts
+        def ensure_contrast(frame, *, label_existed: bool) -> bool:
+            nonlocal profile_written, reused_contrasts
             if frame.label_path is None:
                 raise XcatLabelConversionError(
                     f"frame {frame.index} has no label destination"
                 )
-            label_existed = _mat_variable_matches(
-                frame.label_path, "P", expected_shape
-            )
-            if frame.label_path.exists() and not label_existed:
-                raise XcatLabelConversionError(
-                    f"existing label failed validation: {frame.label_path}"
-                )
-            if label_existed:
-                reused_labels += 1
-            else:
-                convert_xcat_labels_to_mat(
-                    open_xcat_binary(config, frame.binary_path),
-                    frame.label_path,
-                    chunk_slices=chunk_slices,
-                    overwrite=False,
-                )
-            if not _mat_variable_matches(frame.label_path, "P", expected_shape):
-                raise XcatLabelConversionError(
-                    f"label verification failed: {frame.label_path}"
-                )
-
-            # The raw is redundant only after the label has passed reopening.
-            frame.binary_path.unlink()
-
             stem = f"phantom_{config.run.id}_act_{frame.index}"
             contrast_path = (
                 contrast_directory
@@ -1163,43 +1464,156 @@ def _generate_dynamic_cycle(
             )
             if label_existed and contrast_valid:
                 reused_contrasts += 1
-            else:
-                generate_rf_profile_bssfp_contrast(
-                    label_path=frame.label_path,
-                    profile=profile,
-                    transforms=transforms,
-                    pcs_voxel_size_mm=config.phantom.voxel_size_mm,
-                    library=library,
-                    te_ms=sequence.te_ms,
-                    tr_ms=sequence.tr_ms,
-                    profile_output_path=profile_path,
-                    image_output_path=contrast_path,
-                    chunk_slices=chunk_slices,
-                    overwrite=contrast_path.exists(),
-                    write_profile=not profile_written,
-                )
-                profile_written = True
+                return True
+            generate_rf_profile_bssfp_contrast(
+                label_path=frame.label_path,
+                profile=profile,
+                transforms=transforms,
+                pcs_voxel_size_mm=config.phantom.voxel_size_mm,
+                library=library,
+                te_ms=sequence.te_ms,
+                tr_ms=sequence.tr_ms,
+                profile_output_path=profile_path,
+                image_output_path=contrast_path,
+                chunk_slices=chunk_slices,
+                overwrite=contrast_path.exists(),
+                write_profile=not profile_written,
+            )
+            profile_written = True
             if not _mat_variable_matches(
                 contrast_path, "image", expected_shape
             ):
                 raise RfProfileContrastError(
                     f"contrast verification failed: {contrast_path}"
                 )
+            return False
+
+        missing_label_indices = []
+        for zero_based, frame in enumerate(frames.frames):
+            if frame.label_path is None:
+                raise XcatLabelConversionError(
+                    f"frame {frame.index} has no label destination"
+                )
+            label_valid = _mat_variable_matches(
+                frame.label_path, "P", expected_shape
+            )
+            force_regeneration = (
+                regenerate_from_frame is not None
+                and frame.index >= regenerate_from_frame
+            )
+            if (
+                frame.label_path.exists()
+                and not label_valid
+                and not force_regeneration
+            ):
+                raise XcatLabelConversionError(
+                    f"existing label failed validation: {frame.label_path}"
+                )
+            if force_regeneration:
+                missing_label_indices.append(zero_based)
+            elif label_valid:
+                ensure_contrast(frame, label_existed=True)
+            else:
+                missing_label_indices.append(zero_based)
+
+        if not missing_label_indices:
+            print(
+                "Dynamic cycle generation\n"
+                f"Frames:             {total}/{total}\n"
+                "Missing labels:     0\n"
+                "Raw files retained: 0\n"
+                "Verification:       PASS"
+            )
+            _write_dynamic_stage_manifests(config, frames)
+            if config.outputs.save_tissue_labels_nrrd:
+                return _export_labels_nrrd(
+                    configuration,
+                    output=None,
+                    overwrite=False,
+                )
+            return 0
+        first_missing = missing_label_indices[0]
+        parameters, producer_frames = _prepare_resumed_xcat_invocation(
+            config,
+            parameters,
+            frames,
+            first_missing_zero_based=first_missing,
+        )
+        preflight = preflight_xcat_invocation(
+            config,
+            parameters,
+            producer_frames,
+            allow_partial_outputs=True,
+        )
+        if not preflight.passed:
+            print(format_xcat_preflight(preflight, dry_run=False))
+            return 2
+        print(
+            f"Resuming at global frame {first_missing + 1}/{total}; "
+            f"XCAT will generate {len(producer_frames.frames)} missing-tail "
+            "phase(s).",
+            flush=True,
+        )
+
+        def consume(frame) -> None:
+            nonlocal profile_written, reused_labels, reused_contrasts
+            if frame.label_path is None:
+                raise XcatLabelConversionError(
+                    f"frame {frame.index} has no label destination"
+                )
+            label_existed = _mat_variable_matches(
+                frame.label_path, "P", expected_shape
+            )
+            force_regeneration = (
+                regenerate_from_frame is not None
+                and frame.index >= regenerate_from_frame
+            )
+            if (
+                frame.label_path.exists()
+                and not label_existed
+                and not force_regeneration
+            ):
+                raise XcatLabelConversionError(
+                    f"existing label failed validation: {frame.label_path}"
+                )
+            label_reused = label_existed and not force_regeneration
+            if label_reused:
+                reused_labels += 1
+            else:
+                convert_xcat_labels_to_mat(
+                    open_xcat_binary(config, frame.binary_path),
+                    frame.label_path,
+                    chunk_slices=chunk_slices,
+                    overwrite=force_regeneration,
+                )
+            if not _mat_variable_matches(frame.label_path, "P", expected_shape):
+                raise XcatLabelConversionError(
+                    f"label verification failed: {frame.label_path}"
+                )
+
+            # The raw is redundant only after the label has passed reopening.
+            frame.binary_path.unlink()
+
+            contrast_reused = ensure_contrast(
+                frame, label_existed=label_reused
+            )
             print(
                 f"Frame {frame.index}/{total}: label verified, raw removed, "
-                f"contrast {'reused' if label_existed and contrast_valid else 'generated'}",
+                f"contrast {'reused' if contrast_reused else 'generated'}",
                 flush=True,
             )
 
         result = execute_streaming_xcat_invocation(
             config,
-            frames,
+            producer_frames,
             preflight,
             consume,
+            force_generate=regenerate_from_frame is not None,
         )
         print(
             "\nDynamic cycle generation\n"
-            f"Frames:             {result.consumed_frame_count}/{total}\n"
+            f"Frames:             {total}/{total}\n"
+            f"Tail phases run:    {result.consumed_frame_count}\n"
             f"Labels reused:      {reused_labels}\n"
             f"Contrasts reused:   {reused_contrasts}\n"
             "Raw files retained: 0\n"
@@ -1207,6 +1621,13 @@ def _generate_dynamic_cycle(
             f"stderr:             {result.stderr_log}\n"
             "Verification:       PASS"
         )
+        _write_dynamic_stage_manifests(config, frames)
+        if config.outputs.save_tissue_labels_nrrd:
+            return _export_labels_nrrd(
+                configuration,
+                output=None,
+                overwrite=regenerate_from_frame is not None,
+            )
         return 0
     except ConfigurationLoadError as exc:
         print(f"Configuration error:\n  {exc}", file=sys.stderr)
@@ -1230,10 +1651,68 @@ def _generate_dynamic_cycle(
     return 2
 
 
+def _generate_balloon_debug(
+    configuration: Path,
+    *,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        report = generate_balloon_debug_frames(config, overwrite=overwrite)
+        print(format_balloon_debug(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (
+        BalloonDebugError,
+        BalloonPathError,
+        SparseBalloonError,
+        GdSignalError,
+        SequenceReadError,
+        KeyError,
+    ) as exc:
+        print(f"Balloon debug error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _generate_balloon_path_debug(
+    configuration: Path,
+    *,
+    center_spacing_mm: float,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        report = generate_balloon_path_debug(
+            config,
+            center_spacing_mm=center_spacing_mm,
+            overwrite=overwrite,
+        )
+        print(format_balloon_path_debug(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (
+        BalloonDebugError,
+        BalloonPathError,
+        SparseBalloonError,
+        GdSignalError,
+        SequenceReadError,
+        KeyError,
+    ) as exc:
+        print(f"Balloon path debug error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
 def _generate_kspace_debug(
     configuration: Path,
     *,
     coil: int,
+    device_id: int | None,
 ) -> int:
     try:
         config = load_config(configuration)
@@ -1299,26 +1778,60 @@ def _generate_kspace_debug(
             ),
         )
         sequence = read_sequence(config.sequence)
+        excitation = read_pulseq_excitation(sequence.sequence_path)
+        pcs_voxel = np.asarray(
+            config.phantom.voxel_size_mm, dtype=np.float64
+        )
+        logical_voxel = np.abs(transforms.pcs_to_logical) @ pcs_voxel
+        resolution_values = np.asarray(
+            sequence.resolution_mm, dtype=np.float64
+        ).reshape(-1)
+        if resolution_values.size != 1:
+            raise TrajectoryPreparationError(
+                "current trajectory scaling requires one isotropic resolution"
+            )
+        scaled_k, _, _ = scale_isotropic_trajectory_to_resolution(
+            sequence.kx,
+            sequence.ky,
+            sequence.kz,
+            resolution_mm=float(resolution_values[0]),
+        )
         encoding_grids = prepare_encoding_grids(
             ground_truth_shape=prepared.image.shape,
             ground_truth_voxel_size_mm=config.phantom.voxel_size_mm,
             sequence_resolution_mm=sequence.resolution_mm,
+        )
+        selected_device = (
+            config.compute.device_id if device_id is None else device_id
+        )
+        if selected_device < -1:
+            raise ValueError("device ID must be -1 or a non-negative GPU ID")
+        device_tag = (
+            "cpu_reference"
+            if selected_device == -1
+            else f"gpu_{selected_device:02d}_reference"
         )
         output_path = (
             config.run.output_root
             / "kspace"
             / "debug"
             / (
-                f"sigpy_3d_frame_0001_coil_{coil:02d}_"
+                f"sigpy_3d_frame_0001_coil_{coil:02d}_{device_tag}_"
                 "forward_adjoint.mat"
             )
+        )
+        shifted_gt_output_path = (
+            config.run.output_root
+            / "kspace"
+            / "debug"
+            / "shifted_high_resolution_gt_frame_0001.mat"
         )
         report = run_reduced_nufft_validation(
             prepared.image,
             normalized_coil,
-            kx_per_m=sequence.kx,
-            ky_per_m=sequence.ky,
-            kz_per_m=sequence.kz,
+            kx_per_m=scaled_k[0],
+            ky_per_m=scaled_k[1],
+            kz_per_m=scaled_k[2],
             density_compensation=sequence.density_compensation,
             encoding_grids=encoding_grids,
             coil_index=coil,
@@ -1329,6 +1842,13 @@ def _generate_kspace_debug(
                 transforms.logical_axis_patient_directions
             ),
             pcs_to_logical=transforms.pcs_to_logical,
+            rf_center_shift_mm=config.sequence.rf_profile.center_shift_mm,
+            rf_axis_voxel_size_mm=float(
+                logical_voxel[excitation.logical_axis]
+            ),
+            rf_logical_axis=excitation.logical_axis,
+            shifted_ground_truth_output_path=shifted_gt_output_path,
+            device_id=selected_device,
         )
         print("\n" + format_reduced_nufft_validation(report))
         return 0
@@ -1344,6 +1864,436 @@ def _generate_kspace_debug(
         print(f"Encoding-input error:\n  {exc}", file=sys.stderr)
     except (TrajectoryPreparationError, NufftBackendError, ValueError) as exc:
         print(f"NUFFT validation error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _generate_kspace_all_coils_debug(
+    configuration: Path,
+    *,
+    gd_balloon: bool = False,
+) -> int:
+    """Run one full-trajectory forward/adjoint for every normalized coil."""
+
+    try:
+        config = load_config(configuration)
+        if not config.coils.enabled or config.coils.sensitivity_map is None:
+            raise SensitivityMapError(
+                "an enabled sensitivity map is required for multicoil encoding"
+            )
+        if not config.coils.normalize:
+            raise SensitivityMapError(
+                "coils.normalize must be true for multicoil encoding"
+            )
+        info = inspect_sensitivity_map(config.coils.sensitivity_map)
+        cache_path = (
+            config.run.output_root
+            / "kspace"
+            / "cache"
+            / "sensitivity_rss.npy"
+        )
+        normalization = prepare_rss_normalization(info, cache_path)
+        transforms = build_coordinate_transforms(
+            patient_position=config.phantom.patient_position,
+            coordinate_mode=config.sequence.coordinate_mode,
+            sequence_orientation=config.sequence.orientation,
+        )
+        logical_shape = sensitivity_shape_in_logical_frame(
+            info,
+            stored_axis_order=config.coils.axis_order,
+            dcs_to_logical=transforms.dcs_to_logical,
+        )
+        if gd_balloon:
+            image_path = (
+                config.run.output_root
+                / "intervention"
+                / "balloon_debug"
+                / "balloon_debug_01_A.mat"
+            )
+            if not image_path.is_file():
+                raise BalloonDebugError(
+                    f"required frame-1 balloon image does not exist: "
+                    f"{image_path}; run generate-balloon-debug first"
+                )
+        else:
+            image_path = (
+                config.run.output_root
+                / "contrast"
+                / (
+                    f"phantom_{config.run.id}_act_1_"
+                    f"{config.sequence.contrast.model}.mat"
+                )
+            )
+        prepared = prepare_contrast_for_encoding(
+            image_path,
+            logical_shape,
+            source_to_target=transforms.pcs_to_logical,
+            source_frame="XCAT PCS [Sag, Cor, Tra]",
+            target_frame="Pulseq logical [x, y, z]",
+            target_axis_patient_directions=(
+                transforms.logical_axis_patient_directions
+            ),
+        )
+        sequence = read_sequence(config.sequence)
+        excitation = read_pulseq_excitation(sequence.sequence_path)
+        pcs_voxel = np.asarray(
+            config.phantom.voxel_size_mm, dtype=np.float64
+        )
+        logical_voxel = np.abs(transforms.pcs_to_logical) @ pcs_voxel
+        resolution_values = np.asarray(
+            sequence.resolution_mm, dtype=np.float64
+        ).reshape(-1)
+        if resolution_values.size != 1:
+            raise TrajectoryPreparationError(
+                "current trajectory scaling requires one isotropic resolution"
+            )
+        resolution_mm = float(resolution_values[0])
+        scaled_k, scale_factor, target_kmax = (
+            scale_isotropic_trajectory_to_resolution(
+                sequence.kx,
+                sequence.ky,
+                sequence.kz,
+                resolution_mm=resolution_mm,
+            )
+        )
+        encoding_grids = prepare_encoding_grids(
+            ground_truth_shape=prepared.image.shape,
+            ground_truth_voxel_size_mm=config.phantom.voxel_size_mm,
+            sequence_resolution_mm=sequence.resolution_mm,
+        )
+        debug_directory = config.run.output_root / "kspace" / "debug"
+        device_tag = (
+            "cpu_reference"
+            if config.compute.device_id == -1
+            else f"gpu_{config.compute.device_id:02d}_reference"
+        )
+        signal_tag = "gd_balloon_A_" if gd_balloon else ""
+        output_path = debug_directory / (
+            f"sigpy_3d_frame_0001_{signal_tag}all_"
+            f"{info.coil_count:02d}_coils_{device_tag}_forward_adjoint.mat"
+        )
+        shifted_gt_path = debug_directory / (
+            f"shifted_high_resolution_gt_frame_0001_{signal_tag.rstrip('_')}.mat"
+            if gd_balloon
+            else "shifted_high_resolution_gt_frame_0001.mat"
+        )
+
+        def load_coil(coil_index: int) -> np.ndarray:
+            return load_normalized_coil_in_logical_frame(
+                info,
+                coil_index,
+                normalization,
+                stored_axis_order=config.coils.axis_order,
+                dcs_to_logical=transforms.dcs_to_logical,
+            )
+
+        def show_progress(completed: int, total: int) -> None:
+            print(
+                f"Completed coil {completed}/{total}", flush=True
+            )
+
+        report = run_multicoil_nufft_debug(
+            prepared.image,
+            coil_count=info.coil_count,
+            coil_loader=load_coil,
+            kx_per_m=scaled_k[0],
+            ky_per_m=scaled_k[1],
+            kz_per_m=scaled_k[2],
+            density_compensation=sequence.density_compensation,
+            encoding_grids=encoding_grids,
+            output_path=output_path,
+            shifted_ground_truth_output_path=shifted_gt_path,
+            rf_center_shift_mm=config.sequence.rf_profile.center_shift_mm,
+            rf_axis_voxel_size_mm=float(
+                logical_voxel[excitation.logical_axis]
+            ),
+            rf_logical_axis=excitation.logical_axis,
+            trajectory_scale_factor=scale_factor,
+            target_kmax_per_m=target_kmax,
+            device_id=config.compute.device_id,
+            progress=show_progress,
+        )
+        print("\n" + format_multicoil_nufft_debug(report))
+        if gd_balloon:
+            print(f"Balloon input:         {image_path}")
+        else:
+            manifest = write_stage_manifest(
+                config,
+                "fullysampled_kspace",
+                [report.output_path, report.shifted_ground_truth_path],
+            )
+            print(f"K-space manifest:      {manifest}")
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except SequenceReadError as exc:
+        print(f"Sequence error:\n  {exc}", file=sys.stderr)
+    except SensitivityMapError as exc:
+        print(f"Sensitivity-map error:\n  {exc}", file=sys.stderr)
+    except BalloonDebugError as exc:
+        print(f"Balloon debug error:\n  {exc}", file=sys.stderr)
+    except EncodingInputError as exc:
+        print(f"Encoding-input error:\n  {exc}", file=sys.stderr)
+    except (TrajectoryPreparationError, NufftBackendError, ValueError) as exc:
+        print(f"Multicoil NUFFT error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _validate_balloon_kspace_linearity(configuration: Path) -> int:
+    """Validate all-coil tissue plus sparse Gd encoding for frame one."""
+
+    try:
+        config = load_config(configuration)
+
+        def show_progress(signal: str, completed: int, total: int) -> None:
+            print(f"{signal}: completed coil {completed}/{total}", flush=True)
+
+        report = validate_balloon_kspace_linearity(
+            config,
+            progress=show_progress,
+        )
+        print("\n" + format_balloon_encoding_debug(report))
+        passed = (
+            report.nonfinite_value_count == 0
+            and report.forward_relative_error < 1e-5
+            and report.adjoint_relative_error < 1e-5
+        )
+        return 0 if passed else 2
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (
+        BalloonEncodingDebugError,
+        BalloonDebugError,
+        BalloonPathError,
+        GdSignalError,
+        SparseBalloonError,
+        SequenceReadError,
+        SensitivityMapError,
+        EncodingInputError,
+        TrajectoryPreparationError,
+        NufftBackendError,
+        RfProfileContrastError,
+        SliceProfileError,
+        ValueError,
+    ) as exc:
+        print(f"Balloon NUFFT validation error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _compare_nufft_devices(
+    cpu_reference: Path,
+    gpu_reference: Path,
+    output: Path,
+) -> int:
+    try:
+        report = compare_device_references(
+            cpu_reference, gpu_reference, output
+        )
+        print(
+            "CPU/GPU NUFFT parity\n"
+            f"K-space relative L2:  {report.kspace_relative_l2_error:g}\n"
+            f"K-space maximum abs:  {report.kspace_maximum_absolute_error:g}\n"
+            f"Adjoint relative L2:  {report.adjoint_relative_l2_error:g}\n"
+            f"Adjoint maximum abs:  {report.adjoint_maximum_absolute_error:g}\n"
+            f"CPU time:             {report.cpu_elapsed_s:.3f} s\n"
+            f"GPU time:             {report.gpu_elapsed_s:.3f} s\n"
+            f"Speedup:              {report.speedup:.2f}x\n"
+            f"Output:               {report.output_path}\n"
+            f"Overall:              {'PASS' if report.passed else 'FAIL'}"
+        )
+        return 0 if report.passed else 1
+    except (OSError, ValueError) as exc:
+        print(f"Device comparison error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _validate_kspace_reference(
+    shifted_gt: Path,
+    multicoil_reference: Path,
+    output: Path,
+) -> int:
+    try:
+        report = validate_image_reference(
+            shifted_gt, multicoil_reference, output
+        )
+        print(
+            "Shifted-GT/all-coil adjoint validation\n"
+            f"Support correlation:  {report.correlation:g}\n"
+            f"Center offset voxels: {report.center_offset_voxels}\n"
+            f"Center offset mm:     {report.center_offset_mm}\n"
+            f"GT boundary energy:   {report.gt_boundary_energy_ratio:g}\n"
+            f"Adj boundary energy:  {report.adjoint_boundary_energy_ratio:g}\n"
+            "Intended orientation: "
+            + ("best match\n" if report.intended_orientation_is_best else "NOT best\n")
+            + f"Output:               {report.output_path}"
+        )
+        return 0 if report.intended_orientation_is_best else 1
+    except (OSError, ValueError) as exc:
+        print(f"Image reference validation error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _diagnose_kspace_fov(
+    configuration: Path,
+    *,
+    coil: int,
+    kspace_path: Path | None,
+    support_threshold: float,
+    support_margin_mm: float,
+    device_id: int,
+    output: Path | None,
+    overwrite: bool,
+) -> int:
+    """Compare impulse PSFs and one saved tissue k-space over fixed FOVs."""
+
+    try:
+        config = load_config(configuration)
+        if not config.coils.enabled or config.coils.sensitivity_map is None:
+            raise SensitivityMapError(
+                "an enabled sensitivity map is required to define the "
+                "logical 500-mm reference grid"
+            )
+        info = inspect_sensitivity_map(config.coils.sensitivity_map)
+        if not 0 <= coil < info.coil_count:
+            raise SensitivityMapError(
+                f"coil must be between 0 and {info.coil_count - 1}"
+            )
+        transforms = build_coordinate_transforms(
+            patient_position=config.phantom.patient_position,
+            coordinate_mode=config.sequence.coordinate_mode,
+            sequence_orientation=config.sequence.orientation,
+        )
+        logical_shape = sensitivity_shape_in_logical_frame(
+            info,
+            stored_axis_order=config.coils.axis_order,
+            dcs_to_logical=transforms.dcs_to_logical,
+        )
+        logical_voxel = np.abs(transforms.pcs_to_logical) @ np.asarray(
+            config.phantom.voxel_size_mm, dtype=np.float64
+        )
+        sequence = read_sequence(config.sequence)
+        resolution = np.asarray(sequence.resolution_mm, dtype=np.float64).reshape(-1)
+        if resolution.size == 1:
+            resolution = np.repeat(resolution, 3)
+        if resolution.size != 3:
+            raise TrajectoryPreparationError(
+                "sequence resolution must contain one or three values"
+            )
+
+        contrast_path = (
+            config.run.output_root
+            / "contrast"
+            / (
+                f"phantom_{config.run.id}_act_1_"
+                f"{config.sequence.contrast.model}.mat"
+            )
+        )
+        prepared = prepare_contrast_for_encoding(
+            contrast_path,
+            logical_shape,
+            source_to_target=transforms.pcs_to_logical,
+            source_frame="XCAT PCS [Sag, Cor, Tra]",
+            target_frame="Pulseq logical [x, y, z]",
+            target_axis_patient_directions=(
+                transforms.logical_axis_patient_directions
+            ),
+        )
+        support = measure_centered_signal_support(
+            prepared.image,
+            voxel_size_mm=tuple(float(value) for value in logical_voxel),
+            threshold_fraction=support_threshold,
+            margin_mm=support_margin_mm,
+            fov_rounding_mm=tuple(float(value) for value in resolution),
+        )
+        padded_fov = tuple(
+            float(size * voxel)
+            for size, voxel in zip(
+                logical_shape, logical_voxel, strict=True
+            )
+        )
+        del prepared
+
+        source = (
+            kspace_path
+            if kspace_path is not None
+            else (
+                config.run.output_root
+                / "kspace"
+                / "debug"
+                / (
+                    f"sigpy_3d_frame_0001_coil_{coil:02d}_"
+                    "forward_adjoint.mat"
+                )
+            )
+        ).expanduser().resolve(strict=False)
+        if not source.is_file():
+            raise FileNotFoundError(f"saved tissue k-space does not exist: {source}")
+        content = loadmat(source, variable_names=["kspace"])
+        if "kspace" not in content:
+            raise ValueError(f"saved debug file has no kspace variable: {source}")
+        kspace = np.asarray(content["kspace"], dtype=np.complex64)
+
+        native_fov_values = np.asarray(
+            sequence.fov_mm, dtype=np.float64
+        ).reshape(-1)
+        if native_fov_values.size == 1:
+            native_fov_values = np.repeat(native_fov_values, 3)
+        if native_fov_values.size != 3:
+            raise TrajectoryPreparationError(
+                "sequence FOV must contain one or three values"
+            )
+        candidates = {
+            "padded_500mm": padded_fov,
+            "sequence_native": tuple(
+                float(value) for value in native_fov_values
+            ),
+            "support_derived": support.derived_fov_mm,
+        }
+        destination = (
+            output
+            if output is not None
+            else (
+                config.run.output_root
+                / "kspace"
+                / "debug"
+                / (
+                    f"fov_psf_frame_0001_coil_{coil:02d}_os1p5.mat"
+                )
+            )
+        )
+        report = run_fov_psf_diagnostic(
+            kspace=kspace,
+            kspace_path=source,
+            kx_per_m=sequence.kx,
+            ky_per_m=sequence.ky,
+            kz_per_m=sequence.kz,
+            density_compensation=sequence.density_compensation,
+            resolution_mm=tuple(float(value) for value in resolution),
+            support=support,
+            candidate_fovs_mm=candidates,
+            output_path=destination,
+            device_id=device_id,
+            overwrite=overwrite,
+        )
+        print(format_fov_psf_diagnostic(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except SequenceReadError as exc:
+        print(f"Sequence error:\n  {exc}", file=sys.stderr)
+    except SensitivityMapError as exc:
+        print(f"Sensitivity-map error:\n  {exc}", file=sys.stderr)
+    except OrientationTransformError as exc:
+        print(f"Orientation error:\n  {exc}", file=sys.stderr)
+    except (EncodingInputError, TrajectoryPreparationError) as exc:
+        print(f"Encoding-input error:\n  {exc}", file=sys.stderr)
+    except (NufftBackendError, FileExistsError, FileNotFoundError, ValueError) as exc:
+        print(f"K-space diagnostic error:\n  {exc}", file=sys.stderr)
     return 2
 
 
@@ -1406,12 +2356,82 @@ def _export_contrast_nrrd(
     return 2
 
 
+def _export_labels_nrrd(
+    configuration: Path,
+    *,
+    output: Path | None,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        if not config.outputs.save_tissue_labels_nrrd:
+            raise NrrdExportError(
+                "outputs.save_tissue_labels_nrrd is false"
+            )
+        frame_plan = plan_xcat_frames(config, debug_one_frame=False)
+        export_time_step_s = (
+            config.outputs.tissue_labels_nrrd_time_step_s
+        )
+        stride = round(
+            export_time_step_s / config.timeline.xcat_time_step_s
+        )
+        selected_frames = frame_plan.frames[::stride]
+        paths = tuple(
+            frame.label_path
+            for frame in selected_frames
+            if frame.label_path is not None
+        )
+        if len(paths) != len(selected_frames):
+            raise NrrdExportError(
+                "every selected frame must have a label path"
+            )
+        time_step_ms = round(export_time_step_s * 1e3)
+        destination = (
+            output
+            if output is not None
+            else (
+                config.run.output_root
+                / "exports"
+                / (
+                    f"phantom_{config.run.id}_tissue_labels_"
+                    f"{time_step_ms}ms_4d.nrrd"
+                )
+            )
+        )
+
+        def show_progress(completed: int, total: int) -> None:
+            if completed == 1 or completed % 10 == 0 or completed == total:
+                print(f"Label NRRD frame {completed}/{total}", flush=True)
+
+        report = export_label_series_nrrd(
+            paths,
+            destination,
+            voxel_size_mm=config.phantom.voxel_size_mm,
+            time_step_s=export_time_step_s,
+            overwrite=overwrite,
+            progress=show_progress,
+        )
+        print("\n" + format_nrrd_export(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (XcatParameterError, XcatFramePlanError) as exc:
+        print(f"NRRD frame-plan error:\n  {exc}", file=sys.stderr)
+    except NrrdExportError as exc:
+        print(f"NRRD export error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "validate":
         return _validate(args.configuration)
+    if args.command == "inspect-reuse":
+        return _inspect_reuse(args.configuration)
     if args.command == "inspect-sequence":
         return _inspect_sequence(args.configuration, args.matlab_reference)
     if args.command == "compare-bssfp":
@@ -1444,6 +2464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _generate_dynamic_cycle(
             args.configuration,
             chunk_slices=args.chunk_slices,
+            regenerate_from_frame=args.regenerate_from_frame,
         )
     if args.command == "compare-xcat-labels":
         return _compare_xcat_labels(
@@ -1472,6 +2493,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             output=args.output,
             overwrite=args.overwrite,
         )
+    if args.command == "export-labels-nrrd":
+        return _export_labels_nrrd(
+            args.configuration,
+            output=args.output,
+            overwrite=args.overwrite,
+        )
+    if args.command == "generate-balloon-debug":
+        return _generate_balloon_debug(
+            args.configuration,
+            overwrite=args.overwrite,
+        )
+    if args.command == "generate-balloon-path-debug":
+        return _generate_balloon_path_debug(
+            args.configuration,
+            center_spacing_mm=args.center_spacing_mm,
+            overwrite=args.overwrite,
+        )
     if args.command == "prepare-kspace-inputs":
         return _prepare_kspace_inputs(
             args.configuration,
@@ -1481,6 +2519,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _generate_kspace_debug(
             args.configuration,
             coil=args.coil,
+            device_id=args.device_id,
+        )
+    if args.command == "generate-kspace-all-coils-debug":
+        return _generate_kspace_all_coils_debug(args.configuration)
+    if args.command == "generate-balloon-kspace-debug":
+        return _generate_kspace_all_coils_debug(
+            args.configuration,
+            gd_balloon=True,
+        )
+    if args.command == "validate-balloon-kspace-linearity":
+        return _validate_balloon_kspace_linearity(args.configuration)
+    if args.command == "compare-nufft-devices":
+        return _compare_nufft_devices(
+            args.cpu_reference, args.gpu_reference, args.output
+        )
+    if args.command == "validate-kspace-reference":
+        return _validate_kspace_reference(
+            args.shifted_gt, args.multicoil_reference, args.output
+        )
+    if args.command == "diagnose-kspace-fov":
+        return _diagnose_kspace_fov(
+            args.configuration,
+            coil=args.coil,
+            kspace_path=args.kspace,
+            support_threshold=args.support_threshold,
+            support_margin_mm=args.support_margin_mm,
+            device_id=args.device_id,
+            output=args.output,
+            overwrite=args.overwrite,
         )
 
     parser.print_help()

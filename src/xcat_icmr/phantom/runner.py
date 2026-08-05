@@ -281,6 +281,7 @@ def execute_streaming_xcat_invocation(
     consume_frame: Callable[[XcatFrame], None],
     *,
     poll_interval_s: float = 0.25,
+    force_generate: bool = False,
 ) -> StreamingXcatResult:
     """Run XCAT once and consume each closed, complete binary in frame order."""
 
@@ -304,8 +305,13 @@ def execute_streaming_xcat_invocation(
             )
         consume_frame(frame)
 
-    if all(frame.label_path is not None and frame.label_path.is_file()
-           for frame in frames.frames):
+    if (
+        not force_generate
+        and all(
+            frame.label_path is not None and frame.label_path.is_file()
+            for frame in frames.frames
+        )
+    ):
         return StreamingXcatResult(
             return_code=0,
             consumed_frame_count=len(frames.frames),

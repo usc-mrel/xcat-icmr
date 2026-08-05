@@ -19,6 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x[ctk]>=14.1,<15",
+]
 dev = [
     "pytest>=8,<9",
 ]

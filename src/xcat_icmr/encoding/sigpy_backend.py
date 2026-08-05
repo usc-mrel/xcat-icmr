@@ -12,6 +12,10 @@ import numpy as np
 from xcat_icmr.encoding.trajectory import EncodingTrajectory
 
 
+DEFAULT_NUFFT_OVERSAMPLING = 1.5
+DEFAULT_NUFFT_KERNEL_WIDTH = 4.0
+
+
 class NufftBackendError(Exception):
     """Raised when a NUFFT backend cannot execute safely."""
 
@@ -34,8 +38,8 @@ class SigpyNufftBackend:
         self,
         *,
         device_id: int,
-        oversampling: float = 1.25,
-        kernel_width: float = 4.0,
+        oversampling: float = DEFAULT_NUFFT_OVERSAMPLING,
+        kernel_width: float = DEFAULT_NUFFT_KERNEL_WIDTH,
     ) -> None:
         if device_id < -1:
             raise ValueError("device_id must be -1 or a non-negative GPU ID")

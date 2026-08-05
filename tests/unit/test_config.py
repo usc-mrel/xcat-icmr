@@ -61,6 +61,8 @@ def test_loads_valid_configuration_and_resolves_paths(tmp_path: Path) -> None:
     )
     assert config.timeline.xcat_frames_per_kspace_frame == 10
     assert config.sequence.rf_profile.center_shift_mm == 0.0
+    assert config.outputs.save_gt_contrast is True
+    assert config.outputs.save_fullysampled_contrast is True
 
 
 def test_expands_environment_variables(
@@ -105,6 +107,13 @@ def test_kspace_step_must_be_integer_multiple() -> None:
     data = fixture_data()
     data["timeline"]["kspace_time_step_s"] = 0.047
     assert_invalid(data, "integer multiple")
+
+
+def test_label_nrrd_step_must_be_integer_multiple() -> None:
+    data = fixture_data()
+    data["outputs"]["save_tissue_labels_nrrd"] = True
+    data["outputs"]["tissue_labels_nrrd_time_step_s"] = 0.047
+    assert_invalid(data, "tissue_labels_nrrd_time_step_s")
 
 
 def test_enabled_balloon_requires_control_points() -> None:

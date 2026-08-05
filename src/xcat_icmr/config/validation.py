@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from xcat_icmr.config.models import SimulationConfig
+from xcat_icmr.intervention import (
+    BalloonPathError,
+    resolve_simulation_duration,
+)
 
 
 @dataclass(frozen=True)
@@ -77,6 +81,20 @@ def validate_paths(config: SimulationConfig) -> list[ValidationIssue]:
             "intervention.gd_balloon.path.control_points_file",
             balloon.path.control_points_file,
         )
+        if (
+            config.timeline.duration_s == "auto"
+            and balloon.path.control_points_file is not None
+            and balloon.path.control_points_file.is_file()
+        ):
+            try:
+                resolve_simulation_duration(config)
+            except BalloonPathError as exc:
+                issues.append(
+                    ValidationIssue(
+                        "intervention.gd_balloon.path.control_points_file",
+                        str(exc),
+                    )
+                )
 
     if config.coils.enabled:
         _require_file(
@@ -100,11 +118,13 @@ def format_summary(config: SimulationConfig) -> str:
 
     balloon = config.intervention.gd_balloon
     device = "CPU" if config.compute.device_id == -1 else f"GPU {config.compute.device_id}"
-    duration = (
-        "derived from balloon path"
-        if config.timeline.duration_s == "auto"
-        else f"{config.timeline.duration_s:g} s"
-    )
+    resolved_duration = resolve_simulation_duration(config)
+    duration = f"{resolved_duration.duration_s:g} s"
+    if resolved_duration.automatic:
+        duration += (
+            f" (auto: {resolved_duration.path_length_mm:g} mm at "
+            f"{resolved_duration.reference_speed_cm_per_s:g} cm/s)"
+        )
 
     lines = (
         ("Run", config.run.id),

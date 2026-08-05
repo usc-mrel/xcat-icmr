@@ -35,7 +35,10 @@ class ResourcesConfig(ConfigModel):
 
 class OutputsConfig(ConfigModel):
     save_tissue_labels: bool
-    save_contrast_images: bool
+    save_tissue_labels_nrrd: bool = False
+    tissue_labels_nrrd_time_step_s: PositiveFloat = 0.050
+    save_gt_contrast: bool
+    save_fullysampled_contrast: bool
     save_fully_sampled_kspace: bool
     retain_xcat_binary_files: bool
 
@@ -75,7 +78,6 @@ class SequenceConfig(ConfigModel):
     metadata_directory: Path
     coordinate_mode: Literal["XYZ-in-TRA"]
     orientation: Literal["COR", "SAG", "TRA"]
-    rf_direction: Literal["LR", "AP", "SI"]
     rf_profile: RfProfileConfig = Field(default_factory=RfProfileConfig)
     contrast: ContrastConfig
 
@@ -214,6 +216,7 @@ class BalloonPathConfig(ConfigModel):
 class BalloonMovementConfig(ConfigModel):
     velocity_cm_per_s: PositiveFloat
     start_time_s: float = Field(ge=0.0)
+    traversal: Literal["one-way", "round-trip"] = "one-way"
 
 
 class BalloonGeometryConfig(ConfigModel):
@@ -314,6 +317,19 @@ class SimulationConfig(ConfigModel):
             raise ValueError(
                 "coils.sensitivity_map is required when coils are enabled"
             )
+
+        if self.outputs.save_tissue_labels_nrrd:
+            ratio = (
+                self.outputs.tissue_labels_nrrd_time_step_s
+                / self.timeline.xcat_time_step_s
+            )
+            if ratio < 1 or not math.isclose(
+                ratio, round(ratio), rel_tol=0.0, abs_tol=1e-9
+            ):
+                raise ValueError(
+                    "outputs.tissue_labels_nrrd_time_step_s must be an "
+                    "integer multiple of timeline.xcat_time_step_s"
+                )
 
         off_resonance = self.scanner.effects.off_resonance
         if off_resonance.enabled and off_resonance.field_map is None:

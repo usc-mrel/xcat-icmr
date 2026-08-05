@@ -14,7 +14,10 @@ resources:
 
 outputs:
   save_tissue_labels: true
-  save_contrast_images: true
+  save_tissue_labels_nrrd: false
+  tissue_labels_nrrd_time_step_s: 0.050
+  save_gt_contrast: true
+  save_fullysampled_contrast: true
   save_fully_sampled_kspace: true
   retain_xcat_binary_files: false
 
@@ -35,7 +38,6 @@ sequence:
   metadata_directory: resources/metadata
   coordinate_mode: XYZ-in-TRA
   orientation: COR
-  rf_direction: LR
   rf_profile:
     center_shift_mm: 0.0
   contrast:
