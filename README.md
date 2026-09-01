@@ -105,3 +105,65 @@ An existing MATLAB v7.3 `par` file can be checked field-by-field:
 xcat-icmr inspect-sequence configs/my_simulation.yaml \
   --matlab-reference /path/to/par_reference.mat
 ```
+
+## Reusable simulation artifacts
+
+Expensive products are stored under `outputs/cache` using IDs derived from
+the inputs that affect their numerical content. Changing `run.id`, the
+run-specific directory under the same `outputs` root, undersampling, noise, or
+Gd-balloon settings does not erase or replace a compatible tissue cache. A
+changed XCAT, contrast, sequence, trajectory, coil, or NUFFT input resolves to
+a different cache ID, so older results remain available.
+
+The cache is split into three dependency levels:
+
+- `labels/<id>`: one `uint16` XCAT tissue-label cycle.
+- `contrast/<id>`: one real `float32` high-resolution bSSFP tissue cycle.
+- `tissue_kspace/<id>`: per-frame `complex64` fully sampled tissue k-space,
+  shared trajectory metadata, and one `complex64` 4-D low-resolution
+  reference for the complete group.
+
+Inspect the IDs and whether each level is missing, partial, or complete:
+
+```bash
+xcat-icmr inspect-cache configs/my_simulation.yaml
+```
+
+Outputs created by the earlier run-scoped layout can be adopted without
+rerunning XCAT or contrast generation. Labels are converted to `uint16` one
+frame at a time. Compatible contrast files are hard-linked when the filesystem
+supports it, avoiding a second copy:
+
+```bash
+xcat-icmr adopt-legacy-cache configs/my_simulation.yaml
+```
+
+Generate or resume the fully sampled tissue cache:
+
+```bash
+xcat-icmr generate-tissue-kspace-cache configs/my_simulation.yaml
+```
+
+The tissue cache honors the two temporal grids in the YAML. For example:
+
+```yaml
+timeline:
+  xcat_time_step_s: 0.005
+  kspace_time_step_s: 0.010
+  xcat_to_kspace: average
+```
+
+This averages XCAT frames 1-2 before generating k-space frame 1, frames 3-4
+before frame 2, and so on. Averaging occurs on the cropped high-resolution PCS
+grid before orientation and padding, and one multicoil NUFFT is performed per
+aggregated frame. `center` selects the central XCAT frame of each time window.
+`trajectory-aware` is reserved for future sample-time-aware encoding and
+currently raises a not-implemented error. The complete motion cycle must divide
+evenly into the selected k-space time step.
+
+Each frame MAT file contains only `kspace`, ordered as
+`[sample, arm, coil]`. Shared coordinates, DCF, timing, orientation, and NUFFT
+settings are in `tissue_kspace_metadata.mat`. The low-resolution reference is
+stored once as `fullysampled_reference_4d.h5`; its `image` dataset is ordered
+`[logical_x, logical_y, logical_z, time]`. It can be read in MATLAB with
+`h5read(filename, '/image')` or in Python with `h5py.File(filename)['image']`.

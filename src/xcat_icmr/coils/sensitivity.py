@@ -399,6 +399,89 @@ def load_normalized_coil_in_logical_frame(
     return reorient_spatial_array(dcs, dcs_to_logical)
 
 
+def load_normalized_coil_roi_in_logical_frame(
+    info: SensitivityMapInfo,
+    coil_index: int,
+    normalization: RssNormalization,
+    logical_slices: tuple[slice, slice, slice],
+    *,
+    stored_axis_order: tuple[str, str, str],
+    dcs_to_logical: np.ndarray,
+) -> np.ndarray:
+    """Load and normalize only a contiguous logical sensitivity-map ROI."""
+
+    if not 0 <= coil_index < info.coil_count:
+        raise IndexError(
+            f"coil_index must be between 0 and {info.coil_count - 1}"
+        )
+    if set(stored_axis_order) != {"X", "Y", "Z"}:
+        raise SensitivityMapError(
+            "stored_axis_order must contain X, Y, and Z exactly once"
+        )
+    if len(logical_slices) != 3:
+        raise SensitivityMapError("logical_slices must contain three slices")
+    stored_to_dcs = np.zeros((3, 3), dtype=np.float64)
+    for dcs_axis, axis_name in enumerate(("X", "Y", "Z")):
+        stored_to_dcs[dcs_axis, stored_axis_order.index(axis_name)] = 1.0
+    stored_to_logical = np.asarray(dcs_to_logical) @ stored_to_dcs
+    source_axes = np.argmax(np.abs(stored_to_logical), axis=1)
+    logical_shape = tuple(
+        int(info.stored_shape[1 + int(axis)]) for axis in source_axes
+    )
+    stored_selections: list[slice | None] = [None, None, None]
+    output_shape = []
+    for logical_axis, selection in enumerate(logical_slices):
+        start = 0 if selection.start is None else int(selection.start)
+        stop = logical_shape[logical_axis] if selection.stop is None else int(
+            selection.stop
+        )
+        if selection.step not in (None, 1) or not 0 <= start < stop <= logical_shape[
+            logical_axis
+        ]:
+            raise SensitivityMapError("logical ROI slices are invalid")
+        source_axis = int(source_axes[logical_axis])
+        size = int(info.stored_shape[1 + source_axis])
+        sign = stored_to_logical[logical_axis, source_axis]
+        if sign > 0:
+            stored_selection = slice(start, stop)
+        elif size % 2:
+            stored_selection = slice(size - stop, size - start)
+        else:
+            if start == 0:
+                raise SensitivityMapError(
+                    "an even-grid reversed ROI cannot include the zero-filled edge"
+                )
+            stored_selection = slice(size - stop + 1, size - start + 1)
+        stored_selections[source_axis] = stored_selection
+        output_shape.append(stop - start)
+    if any(selection is None for selection in stored_selections):
+        raise SensitivityMapError("logical ROI does not map to every stored axis")
+    stored_selection_tuple = tuple(stored_selections)  # type: ignore[arg-type]
+    rss = np.load(normalization.cache_path, mmap_mode="r")
+    with h5py.File(info.path, "r") as handle:
+        dataset = handle[info.dataset_name]
+        values = _as_complex(
+            np.asarray(dataset[(coil_index,) + stored_selection_tuple])
+        )
+    denominator = np.asarray(rss[stored_selection_tuple])
+    normalized = np.divide(
+        values,
+        denominator,
+        out=np.zeros_like(values),
+        where=denominator > normalization.absolute_epsilon,
+    )
+    logical = np.transpose(normalized, tuple(int(axis) for axis in source_axes))
+    for logical_axis, source_axis_value in enumerate(source_axes):
+        source_axis = int(source_axis_value)
+        if stored_to_logical[logical_axis, source_axis] < 0:
+            logical = np.flip(logical, axis=logical_axis)
+    if logical.shape != tuple(output_shape):
+        raise SensitivityMapError(
+            f"logical ROI shape {logical.shape} != {tuple(output_shape)}"
+        )
+    return np.asarray(logical, dtype=np.complex64)
+
+
 def format_sensitivity_preparation(
     info: SensitivityMapInfo,
     normalization: RssNormalization,

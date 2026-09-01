@@ -55,9 +55,9 @@ def test_writes_matlab_p_with_exact_shape_dtype_and_values(
     saved = loadmat(destination, variable_names=["P"])["P"]
     assert report.label_path == destination
     assert report.logical_shape == expected.shape
-    assert report.dtype == "float32"
+    assert report.dtype == "uint16"
     assert report.unique_labels == tuple(range(72))
-    assert saved.dtype == np.dtype(np.float32)
+    assert saved.dtype == np.dtype(np.uint16)
     np.testing.assert_array_equal(saved, expected)
 
 

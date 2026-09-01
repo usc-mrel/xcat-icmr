@@ -38,7 +38,9 @@ outputs:
   # Coarser trajectory-resolution contrast reconstructed from fully sampled
   # simulated k-space. This output is implemented with the production k-space stage.
   save_fullysampled_contrast: true
-  save_fully_sampled_kspace: true
+  # The forward NUFFT is always evaluated. Retain its large per-frame k-space
+  # only when explicitly requested; otherwise discard it after the adjoint.
+  save_fully_sampled_kspace: false
   retain_xcat_binary_files: false
 
 # -------------------------------------------------------------------------------------------------
@@ -86,10 +88,10 @@ timeline:
   duration_s: auto
 
   # XCAT anatomy is generated more frequently than the expensive k-space
-  # encoding. The current values combine ten 5 ms XCAT frames per 50 ms
-  # k-space frame.
+  # encoding. The current values average two 5 ms XCAT frames into each
+  # 10 ms k-space frame before coil weighting and NUFFT encoding.
   xcat_time_step_s: 0.005
-  kspace_time_step_s: 0.055
+  kspace_time_step_s: 0.005
   xcat_to_kspace: average  # average | center | trajectory-aware
 
 # -------------------------------------------------------------------------------------------------
@@ -187,6 +189,11 @@ coils:
 
   # Apply voxelwise root-sum-of-squares normalization when the map is loaded.
   normalize: true
+
+# Physical forward/adjoint FOV in Pulseq logical [x, y, z]. The matrix is
+# derived from this FOV, the sequence resolution, and the measured k extent.
+encoding:
+  target_fov_mm: [500.0, 150.0, 250.0]
 
 undersampling:
   enabled: false

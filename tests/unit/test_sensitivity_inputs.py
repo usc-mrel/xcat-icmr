@@ -10,6 +10,7 @@ from xcat_icmr.coils import (
     inspect_sensitivity_map,
     load_normalized_coil,
     load_normalized_coil_in_logical_frame,
+    load_normalized_coil_roi_in_logical_frame,
     prepare_rss_normalization,
     sensitivity_shape_in_logical_frame,
 )
@@ -136,3 +137,13 @@ def test_reorients_declared_dcs_coil_to_cor_logical_axes(
         logical_coil,
         np.transpose(stored_coil, (2, 0, 1)),
     )
+
+    roi = load_normalized_coil_roi_in_logical_frame(
+        info,
+        0,
+        normalization,
+        (slice(1, 4), slice(1, 3), slice(1, 4)),
+        stored_axis_order=("X", "Y", "Z"),
+        dcs_to_logical=transforms.dcs_to_logical,
+    )
+    np.testing.assert_allclose(roi, logical_coil[1:4, 1:3, 1:4])

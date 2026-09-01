@@ -67,9 +67,11 @@ def convert_xcat_labels_to_mat(
         ) as temporary:
             temporary_path = Path(temporary.name)
 
-        # MATLAB v5 files are directly loadable by MATLAB and are sufficient
-        # here while a float32 frame remains below the MATLAB v5 2 GB limit.
-        labels = np.asarray(volume.cropped, dtype=np.float32)
+        if unique_labels and max(unique_labels) > np.iinfo(np.uint16).max:
+            raise XcatLabelConversionError(
+                "XCAT label values exceed the uint16 storage range"
+            )
+        labels = np.asarray(volume.cropped, dtype=np.uint16)
         savemat(
             temporary_path,
             {"P": labels},
@@ -92,10 +94,10 @@ def convert_xcat_labels_to_mat(
                 "saved MATLAB label shape changed during writing: "
                 f"{saved_labels.shape} != {volume.cropped_shape}"
             )
-        if saved_labels.dtype != np.dtype(np.float32):
+        if saved_labels.dtype != np.dtype(np.uint16):
             raise XcatLabelConversionError(
                 "saved MATLAB label dtype changed during writing: "
-                f"{saved_labels.dtype} != float32"
+                f"{saved_labels.dtype} != uint16"
             )
 
         temporary_path.chmod(0o644)
@@ -115,7 +117,7 @@ def convert_xcat_labels_to_mat(
         binary_path=volume.path,
         label_path=destination,
         logical_shape=volume.cropped_shape,
-        dtype="float32",
+        dtype="uint16",
         unique_labels=unique_labels,
         file_size_bytes=destination.stat().st_size,
     )

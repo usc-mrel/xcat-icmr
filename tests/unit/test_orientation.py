@@ -4,6 +4,7 @@ import numpy as np
 
 from xcat_icmr.sequence.orientation import (
     build_coordinate_transforms,
+    map_spatial_indices,
     reorient_spatial_array,
     transform_vector_components,
 )
@@ -91,3 +92,34 @@ def test_cor_component_mapping_preserves_logical_arrays() -> None:
     np.testing.assert_array_equal(dcs[0], ky)
     np.testing.assert_array_equal(dcs[1], kz)
     np.testing.assert_array_equal(dcs[2], kx)
+
+
+def test_index_mapping_matches_array_reorientation_and_padding() -> None:
+    transforms = build_coordinate_transforms(
+        patient_position="HFS",
+        coordinate_mode="XYZ-in-TRA",
+        sequence_orientation="COR",
+    )
+    source_shape = (4, 6, 8)
+    target_shape = (12, 12, 12)
+    source_indices = np.asarray(((2, 3, 4), (3, 4, 6)), dtype=np.int32)
+    mapped, valid = map_spatial_indices(
+        source_indices,
+        source_shape=source_shape,
+        source_to_target=transforms.pcs_to_logical,
+        target_shape=target_shape,
+    )
+
+    source = np.zeros(source_shape, dtype=np.int32)
+    for value, index in enumerate(source_indices, start=1):
+        source[tuple(index)] = value
+    oriented = reorient_spatial_array(source, transforms.pcs_to_logical)
+    padding = tuple(
+        ((target - size) // 2, target - size - (target - size) // 2)
+        for size, target in zip(oriented.shape, target_shape, strict=True)
+    )
+    padded = np.pad(oriented, padding)
+
+    assert np.all(valid)
+    for value, index in enumerate(mapped, start=1):
+        assert padded[tuple(index)] == value

@@ -31,7 +31,7 @@ def test_debug_plan_contains_one_frame_at_zero() -> None:
     assert plan.frames[0].index == 1
     assert plan.frames[0].binary_path.name == "phantom_test-run_act_1.bin"
     assert plan.frames[0].label_path is not None
-    assert plan.frames[0].label_path.name == "phantom_test-run_act_1.mat"
+    assert plan.frames[0].label_path.name == "label_frame_0001.mat"
     assert plan.output_prefix.name == "phantom_test-run"
 
 
@@ -76,18 +76,10 @@ def test_plan_reports_preexisting_files_without_creating_directories(
 ) -> None:
     config = make_config()
     config.run.output_root = tmp_path / "outputs"
-    binary = (
-        config.run.output_root
-        / "xcat"
-        / "raw"
-        / "phantom_test-run_act_1.bin"
-    )
-    label = (
-        config.run.output_root
-        / "xcat"
-        / "labels"
-        / "phantom_test-run_act_1.mat"
-    )
+    initial_plan = plan_xcat_frames(config)
+    binary = initial_plan.frames[0].binary_path
+    label = initial_plan.frames[0].label_path
+    assert label is not None
     binary.parent.mkdir(parents=True)
     label.parent.mkdir(parents=True)
     binary.touch()

@@ -12,7 +12,23 @@ import numpy as np
 from pydantic import ValidationError
 from scipy.io import loadmat, whosmat
 
-from xcat_icmr.cache import stage_reuse_status, write_stage_manifest
+from xcat_icmr.cache import (
+    artifact_cache_status,
+    contrast_cache_entry,
+    contrast_frame_path,
+    contrast_profile_path,
+    fullysampled_reference_cache_entry,
+    label_cache_entry,
+    stage_reuse_status,
+    tissue_kspace_cache_entry,
+    write_artifact_manifest,
+    write_stage_manifest,
+)
+from xcat_icmr.cache_migration import (
+    CacheMigrationError,
+    adopt_legacy_cache,
+    format_cache_migration,
+)
 
 from xcat_icmr.coils import (
     SensitivityMapError,
@@ -52,6 +68,11 @@ from xcat_icmr.encoding import (
     validate_sigpy_reference,
     validate_image_reference,
 )
+from xcat_icmr.encoding.fullysampled_reference import (
+    FullysampledReferenceError,
+    format_fullysampled_reference,
+    generate_fullysampled_reference,
+)
 from xcat_icmr.exporting import (
     NrrdExportError,
     export_contrast_series_nrrd,
@@ -74,6 +95,11 @@ from xcat_icmr.intervention.encoding_debug import (
     BalloonEncodingDebugError,
     format_balloon_encoding_debug,
     validate_balloon_kspace_linearity,
+)
+from xcat_icmr.intervention.reference_debug import (
+    ThreePositionReferenceDebugError,
+    format_three_position_reference_debug,
+    generate_three_position_reference_debug,
 )
 from xcat_icmr import __version__
 from xcat_icmr.phantom import (
@@ -155,6 +181,36 @@ def build_parser() -> argparse.ArgumentParser:
         "configuration",
         type=Path,
         help="path to a simulation YAML file",
+    )
+
+    cache_parser = subparsers.add_parser(
+        "inspect-cache",
+        help="show content-addressed label, contrast, and k-space cache IDs",
+    )
+    cache_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+
+    adopt_parser = subparsers.add_parser(
+        "adopt-legacy-cache",
+        help="convert existing labels to uint16 and adopt existing contrasts",
+    )
+    adopt_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    adopt_parser.add_argument(
+        "--labels-only",
+        action="store_true",
+        help="adopt labels without adopting the current contrast series",
+    )
+    adopt_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace files inside the resolved cache IDs",
     )
 
     inspect_parser = subparsers.add_parser(
@@ -558,6 +614,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to a simulation YAML file",
     )
 
+    reference_parser = subparsers.add_parser(
+        "generate-fullysampled-reference",
+        help=(
+            "forward/adjoint encode tissue contrast and save only the "
+            "coil-combined fully sampled image series"
+        ),
+    )
+    reference_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    reference_parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=1,
+        help="first one-based reference frame to encode (default: 1)",
+    )
+    reference_parser.add_argument(
+        "--end-frame",
+        type=int,
+        help="last one-based reference frame (default: final frame)",
+    )
+    reference_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace selected completed reference frames",
+    )
+
+    three_position_parser = subparsers.add_parser(
+        "generate-three-position-reference-debug",
+        help=(
+            "add first/middle/last catheter balloons to frame 1 and encode "
+            "their all-coil fully sampled reference"
+        ),
+    )
+    three_position_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    three_position_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace the existing three-position debug MAT file",
+    )
+
     parity_parser = subparsers.add_parser(
         "compare-nufft-devices",
         help="compare saved CPU and GPU forward/adjoint references",
@@ -870,6 +973,18 @@ def _convert_xcat_labels(
             "Raw binaries: removed after verified conversion\n"
             "Verification: PASS"
         )
+        if not debug_one_frame:
+            label_entry = label_cache_entry(config)
+            label_paths = [report.label_path for report in reports]
+            write_artifact_manifest(
+                label_entry,
+                status="complete",
+                frame_count=total,
+                completed_frame_indices=list(range(1, total + 1)),
+                outputs=label_paths,
+            )
+            manifest = write_stage_manifest(config, "labels", label_paths)
+            print(f"Label manifest: {manifest}")
         return 0
     except ConfigurationLoadError as exc:
         print(f"Configuration error:\n  {exc}", file=sys.stderr)
@@ -907,7 +1022,6 @@ def _generate_contrast(
             config, debug_one_frame=debug_one_frame
         )
         expected_shape = xcat_label_shape(config)
-        contrast_directory = config.run.output_root / "contrast"
         reports = []
         for frame in frame_plan.frames:
             if frame.label_path is None:
@@ -915,13 +1029,7 @@ def _generate_contrast(
                     "contrast generation currently requires "
                     "outputs.save_tissue_labels to be true"
                 )
-            image_path = (
-                contrast_directory
-                / (
-                    f"phantom_{config.run.id}_act_{frame.index}_"
-                    f"{config.sequence.contrast.model}.mat"
-                )
-            )
+            image_path = contrast_frame_path(config, frame.index)
             reports.append(
                 generate_bssfp_contrast(
                     frame.label_path,
@@ -1016,14 +1124,7 @@ def _prepare_kspace_inputs(
             progress=show_progress,
         )
 
-        image_path = (
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_1_"
-                f"{config.sequence.contrast.model}.mat"
-            )
-        )
+        image_path = contrast_frame_path(config, 1)
         logical_shape = sensitivity_shape_in_logical_frame(
             info,
             stored_axis_order=config.coils.axis_order,
@@ -1130,14 +1231,11 @@ def _generate_spatially_varying_fa_contrast(
             voxel_size_mm=float(logical_voxel[logical_axis]),
             center_shift_mm=config.sequence.rf_profile.center_shift_mm,
         )
-        contrast_directory = config.run.output_root / "contrast"
+        contrast_entry = contrast_cache_entry(config)
         frame_plan = plan_xcat_frames(
             config, debug_one_frame=debug_one_frame
         )
-        profile_path = (
-            contrast_directory
-            / f"phantom_{config.run.id}_rf_slice_profile.mat"
-        )
+        profile_path = contrast_profile_path(config)
         library = get_tissue_library(
             config.sequence.contrast.tissue_library
         )
@@ -1148,7 +1246,6 @@ def _generate_spatially_varying_fa_contrast(
                 raise RfProfileContrastError(
                     f"frame {frame.index} has no planned label path"
                 )
-            stem = f"phantom_{config.run.id}_act_{frame.index}"
             report = generate_rf_profile_bssfp_contrast(
                 label_path=frame.label_path,
                 profile=profile,
@@ -1158,10 +1255,7 @@ def _generate_spatially_varying_fa_contrast(
                 te_ms=sequence.te_ms,
                 tr_ms=sequence.tr_ms,
                 profile_output_path=profile_path,
-                image_output_path=(
-                    contrast_directory
-                    / f"{stem}_{config.sequence.contrast.model}.mat"
-                ),
+                image_output_path=contrast_frame_path(config, frame.index),
                 chunk_slices=chunk_slices,
                 overwrite=overwrite,
                 write_profile=completed == 1,
@@ -1183,6 +1277,20 @@ def _generate_spatially_varying_fa_contrast(
             f"Last contrast:  {reports[-1].image_path}\n"
             "Verification:   PASS"
         )
+        if not debug_one_frame:
+            write_artifact_manifest(
+                contrast_entry,
+                status="complete",
+                frame_count=total,
+                completed_frame_indices=list(range(1, total + 1)),
+                outputs=[profile_path, *[report.image_path for report in reports]],
+            )
+            manifest = write_stage_manifest(
+                config,
+                "contrast",
+                [profile_path, *[report.image_path for report in reports]],
+            )
+            print(f"Contrast manifest: {manifest}")
         return 0
     except ConfigurationLoadError as exc:
         print(f"Configuration error:\n  {exc}", file=sys.stderr)
@@ -1207,6 +1315,7 @@ def _mat_variable_matches(
     path: Path,
     variable_name: str,
     expected_shape: tuple[int, ...],
+    expected_dtype: str = "single",
 ) -> bool:
     """Check a saved frame without loading its complete voxel array."""
 
@@ -1219,7 +1328,7 @@ def _mat_variable_matches(
         }
     except (OSError, ValueError):
         return False
-    return entries.get(variable_name) == (expected_shape, "single")
+    return entries.get(variable_name) == (expected_shape, expected_dtype)
 
 
 def _prepare_resumed_xcat_invocation(
@@ -1335,16 +1444,30 @@ def _write_dynamic_stage_manifests(config, frames: XcatFramePlan) -> None:
                 f"frame {frame.index} has no label path for manifest"
             )
         label_paths.append(frame.label_path)
-        contrast_paths.append(
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_{frame.index}_"
-                f"{config.sequence.contrast.model}.mat"
-            )
-        )
+        contrast_paths.append(contrast_frame_path(config, frame.index))
+    label_entry = label_cache_entry(config)
+    contrast_entry = contrast_cache_entry(config)
+    indices = [frame.index for frame in frames.frames]
+    write_artifact_manifest(
+        label_entry,
+        status="complete",
+        frame_count=len(frames.frames),
+        completed_frame_indices=indices,
+        outputs=label_paths,
+    )
+    write_artifact_manifest(
+        contrast_entry,
+        status="complete",
+        frame_count=len(frames.frames),
+        completed_frame_indices=indices,
+        outputs=[contrast_profile_path(config), *contrast_paths],
+    )
     write_stage_manifest(config, "labels", label_paths)
-    write_stage_manifest(config, "contrast", contrast_paths)
+    write_stage_manifest(
+        config,
+        "contrast",
+        [contrast_profile_path(config), *contrast_paths],
+    )
 
 
 def _inspect_reuse(configuration: Path) -> int:
@@ -1353,7 +1476,7 @@ def _inspect_reuse(configuration: Path) -> int:
     try:
         config = load_config(configuration)
         print("Simulation stage reuse")
-        for stage in ("labels", "contrast", "fullysampled_kspace"):
+        for stage in ("labels", "contrast", "fullysampled_reference"):
             status = stage_reuse_status(config, stage)
             state = "REUSE" if status.reusable else "REGENERATE"
             print(f"{stage:24s} {state:10s} {status.reason}")
@@ -1363,6 +1486,59 @@ def _inspect_reuse(configuration: Path) -> int:
         print(f"Configuration error:\n  {exc}", file=sys.stderr)
     except ValidationError as exc:
         print(format_validation_error(exc), file=sys.stderr)
+    return 2
+
+
+def _inspect_artifact_cache(configuration: Path) -> int:
+    """Print stable IDs and cache states without generating artifacts."""
+
+    try:
+        config = load_config(configuration)
+        entries = (
+            label_cache_entry(config),
+            contrast_cache_entry(config),
+            fullysampled_reference_cache_entry(config),
+        )
+        print("Content-addressed artifact cache")
+        for entry in entries:
+            status = artifact_cache_status(entry)
+            print(f"{entry.kind:16s} {status.state:7s} {entry.cache_id}")
+            print(f"  path:   {entry.directory}")
+            print(f"  reason: {status.reason}")
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except OSError as exc:
+        print(f"Cache inspection error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _adopt_legacy_cache(
+    configuration: Path,
+    *,
+    labels_only: bool,
+    overwrite: bool,
+) -> int:
+    """Adopt the current run-scoped outputs without rerunning simulation."""
+
+    try:
+        config = load_config(configuration)
+        report = adopt_legacy_cache(
+            config,
+            include_contrast=not labels_only,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_cache_migration(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (CacheMigrationError, OSError, ValueError) as exc:
+        print(f"Cache adoption error:\n  {exc}", file=sys.stderr)
     return 2
 
 
@@ -1432,11 +1608,8 @@ def _generate_dynamic_cycle(
             center_shift_mm=config.sequence.rf_profile.center_shift_mm,
         )
         expected_shape = xcat_label_shape(config)
-        contrast_directory = config.run.output_root / "contrast"
-        profile_path = (
-            contrast_directory
-            / f"phantom_{config.run.id}_rf_slice_profile.mat"
-        )
+        contrast_entry = contrast_cache_entry(config)
+        profile_path = contrast_profile_path(config)
         library = get_tissue_library(
             config.sequence.contrast.tissue_library
         )
@@ -1454,11 +1627,7 @@ def _generate_dynamic_cycle(
                 raise XcatLabelConversionError(
                     f"frame {frame.index} has no label destination"
                 )
-            stem = f"phantom_{config.run.id}_act_{frame.index}"
-            contrast_path = (
-                contrast_directory
-                / f"{stem}_{config.sequence.contrast.model}.mat"
-            )
+            contrast_path = contrast_frame_path(config, frame.index)
             contrast_valid = _mat_variable_matches(
                 contrast_path, "image", expected_shape
             )
@@ -1495,7 +1664,7 @@ def _generate_dynamic_cycle(
                     f"frame {frame.index} has no label destination"
                 )
             label_valid = _mat_variable_matches(
-                frame.label_path, "P", expected_shape
+                frame.label_path, "P", expected_shape, "uint16"
             )
             force_regeneration = (
                 regenerate_from_frame is not None
@@ -1562,7 +1731,7 @@ def _generate_dynamic_cycle(
                     f"frame {frame.index} has no label destination"
                 )
             label_existed = _mat_variable_matches(
-                frame.label_path, "P", expected_shape
+                frame.label_path, "P", expected_shape, "uint16"
             )
             force_regeneration = (
                 regenerate_from_frame is not None
@@ -1586,7 +1755,9 @@ def _generate_dynamic_cycle(
                     chunk_slices=chunk_slices,
                     overwrite=force_regeneration,
                 )
-            if not _mat_variable_matches(frame.label_path, "P", expected_shape):
+            if not _mat_variable_matches(
+                frame.label_path, "P", expected_shape, "uint16"
+            ):
                 raise XcatLabelConversionError(
                     f"label verification failed: {frame.label_path}"
                 )
@@ -1759,14 +1930,7 @@ def _generate_kspace_debug(
             dcs_to_logical=transforms.dcs_to_logical,
         )
 
-        image_path = (
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_1_"
-                f"{config.sequence.contrast.model}.mat"
-            )
-        )
+        image_path = contrast_frame_path(config, 1)
         prepared = prepare_contrast_for_encoding(
             image_path,
             logical_shape,
@@ -1915,14 +2079,7 @@ def _generate_kspace_all_coils_debug(
                     f"{image_path}; run generate-balloon-debug first"
                 )
         else:
-            image_path = (
-                config.run.output_root
-                / "contrast"
-                / (
-                    f"phantom_{config.run.id}_act_1_"
-                    f"{config.sequence.contrast.model}.mat"
-                )
-            )
+            image_path = contrast_frame_path(config, 1)
         prepared = prepare_contrast_for_encoding(
             image_path,
             logical_shape,
@@ -2083,6 +2240,82 @@ def _validate_balloon_kspace_linearity(configuration: Path) -> int:
     return 2
 
 
+def _generate_fullysampled_reference(
+    configuration: Path,
+    *,
+    start_frame: int,
+    end_frame: int | None,
+    overwrite: bool,
+) -> int:
+    """Generate or resume the fully sampled tissue image reference."""
+
+    try:
+        config = load_config(configuration)
+        report = generate_fullysampled_reference(
+            config,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_fullysampled_reference(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (
+        FullysampledReferenceError,
+        SequenceReadError,
+        SensitivityMapError,
+        EncodingInputError,
+        TrajectoryPreparationError,
+        NufftBackendError,
+        NotImplementedError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Fully sampled reference error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
+def _generate_three_position_reference_debug(
+    configuration: Path,
+    *,
+    overwrite: bool,
+) -> int:
+    """Generate the frame-1 A/middle/B catheter alignment diagnostic."""
+
+    try:
+        config = load_config(configuration)
+        report = generate_three_position_reference_debug(
+            config,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_three_position_reference_debug(report))
+        return 0
+    except ConfigurationLoadError as exc:
+        print(f"Configuration error:\n  {exc}", file=sys.stderr)
+    except ValidationError as exc:
+        print(format_validation_error(exc), file=sys.stderr)
+    except (
+        ThreePositionReferenceDebugError,
+        BalloonPathError,
+        GdSignalError,
+        SparseBalloonError,
+        SequenceReadError,
+        SensitivityMapError,
+        EncodingInputError,
+        TrajectoryPreparationError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Three-position reference debug error:\n  {exc}", file=sys.stderr)
+    return 2
+
+
 def _compare_nufft_devices(
     cpu_reference: Path,
     gpu_reference: Path,
@@ -2183,14 +2416,7 @@ def _diagnose_kspace_fov(
                 "sequence resolution must contain one or three values"
             )
 
-        contrast_path = (
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_1_"
-                f"{config.sequence.contrast.model}.mat"
-            )
-        )
+        contrast_path = contrast_frame_path(config, 1)
         prepared = prepare_contrast_for_encoding(
             contrast_path,
             logical_shape,
@@ -2306,13 +2532,8 @@ def _export_contrast_nrrd(
     try:
         config = load_config(configuration)
         frame_plan = plan_xcat_frames(config, debug_one_frame=False)
-        contrast_directory = config.run.output_root / "contrast"
         paths = tuple(
-            contrast_directory
-            / (
-                f"phantom_{config.run.id}_act_{frame.index}_"
-                f"{config.sequence.contrast.model}.mat"
-            )
+            contrast_frame_path(config, frame.index)
             for frame in frame_plan.frames
         )
         destination = (
@@ -2432,6 +2653,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _validate(args.configuration)
     if args.command == "inspect-reuse":
         return _inspect_reuse(args.configuration)
+    if args.command == "inspect-cache":
+        return _inspect_artifact_cache(args.configuration)
+    if args.command == "adopt-legacy-cache":
+        return _adopt_legacy_cache(
+            args.configuration,
+            labels_only=args.labels_only,
+            overwrite=args.overwrite,
+        )
     if args.command == "inspect-sequence":
         return _inspect_sequence(args.configuration, args.matlab_reference)
     if args.command == "compare-bssfp":
@@ -2530,6 +2759,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "validate-balloon-kspace-linearity":
         return _validate_balloon_kspace_linearity(args.configuration)
+    if args.command == "generate-fullysampled-reference":
+        return _generate_fullysampled_reference(
+            args.configuration,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
+            overwrite=args.overwrite,
+        )
+    if args.command == "generate-three-position-reference-debug":
+        return _generate_three_position_reference_debug(
+            args.configuration,
+            overwrite=args.overwrite,
+        )
     if args.command == "compare-nufft-devices":
         return _compare_nufft_devices(
             args.cpu_reference, args.gpu_reference, args.output

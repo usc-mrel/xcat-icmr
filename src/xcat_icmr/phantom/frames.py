@@ -68,9 +68,12 @@ def plan_xcat_frames(
     motion = plan_xcat_motion_cycle(
         config, debug_one_frame=debug_one_frame
     )
+    from xcat_icmr.cache import label_cache_entry
+
+    label_entry = label_cache_entry(config)
     xcat_directory = config.run.output_root / "xcat"
-    raw_directory = xcat_directory / "raw"
-    label_directory = xcat_directory / "labels"
+    raw_directory = xcat_directory / "raw" / label_entry.cache_id
+    label_directory = label_entry.directory / "frames"
     stem = f"phantom_{run_id}"
     output_prefix = raw_directory / stem
 
@@ -80,7 +83,7 @@ def plan_xcat_frames(
         time_s = zero_based_index * motion.time_step_s
         binary_path = raw_directory / f"{stem}_act_{index}.bin"
         label_path = (
-            label_directory / f"{stem}_act_{index}.mat"
+            label_directory / f"label_frame_{index:04d}.mat"
             if config.outputs.save_tissue_labels
             else None
         )

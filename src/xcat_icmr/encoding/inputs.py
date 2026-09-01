@@ -82,6 +82,25 @@ def prepare_contrast_for_encoding(
 ) -> PreparedContrast:
     """Load, optionally reorient, and center-pad a MATLAB contrast image."""
 
+    resolved, source = load_contrast_image(path, variable_name=variable_name)
+    return prepare_contrast_array_for_encoding(
+        source,
+        target_shape,
+        source_path=resolved,
+        source_to_target=source_to_target,
+        source_frame=source_frame,
+        target_frame=target_frame,
+        target_axis_patient_directions=target_axis_patient_directions,
+    )
+
+
+def load_contrast_image(
+    path: str | Path,
+    *,
+    variable_name: str = "image",
+) -> tuple[Path, np.ndarray]:
+    """Load and validate one numeric, finite 3-D contrast image."""
+
     resolved = Path(path).expanduser().resolve(strict=False)
     if not resolved.is_file():
         raise EncodingInputError(
@@ -110,12 +129,33 @@ def prepare_contrast_for_encoding(
         raise EncodingInputError("contrast image must be numeric")
     if not np.all(np.isfinite(source)):
         raise EncodingInputError("contrast image contains non-finite values")
+    return resolved, np.asarray(source, dtype=np.float32)
+
+
+def prepare_contrast_array_for_encoding(
+    source: np.ndarray,
+    target_shape: tuple[int, int, int],
+    *,
+    source_path: str | Path,
+    source_to_target: np.ndarray | None = None,
+    source_frame: str = "unspecified",
+    target_frame: str = "unspecified",
+    target_axis_patient_directions: tuple[str, str, str] | None = None,
+) -> PreparedContrast:
+    """Reorient and center-pad an already loaded contrast image."""
+
+    source_array = np.asarray(source, dtype=np.float32)
+    if source_array.ndim != 3 or not np.all(np.isfinite(source_array)):
+        raise EncodingInputError(
+            "in-memory contrast image must be finite and three-dimensional"
+        )
+    resolved = Path(source_path).expanduser().resolve(strict=False)
 
     oriented = (
-        np.asarray(source, dtype=np.float32)
+        source_array
         if source_to_target is None
         else reorient_spatial_array(
-            np.asarray(source, dtype=np.float32), source_to_target
+            source_array, source_to_target
         )
     )
     padding = center_padding(oriented.shape, target_shape)
@@ -129,7 +169,7 @@ def prepare_contrast_for_encoding(
         path=resolved,
         source_frame=source_frame,
         target_frame=target_frame,
-        source_shape=source.shape,
+        source_shape=source_array.shape,
         oriented_shape=oriented.shape,
         target_shape=target_shape,
         padding=padding,

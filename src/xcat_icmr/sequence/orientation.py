@@ -214,3 +214,57 @@ def reorient_spatial_array(
         if transform[target_axis, source_axis] < 0:
             output = _reverse_axis_preserving_zero(output, target_axis)
     return output
+
+
+def map_spatial_indices(
+    indices: np.ndarray,
+    *,
+    source_shape: tuple[int, int, int],
+    source_to_target: np.ndarray,
+    target_shape: tuple[int, int, int] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map zero-based voxel indices exactly like ``reorient_spatial_array``.
+
+    If ``target_shape`` is supplied, the reoriented coordinates are centered
+    in that larger grid using the same padding convention as encoding inputs.
+    The returned Boolean mask identifies source samples retained by the
+    zero-preserving reversal used for even matrices.
+    """
+
+    points = np.asarray(indices, dtype=np.int64)
+    if points.ndim != 2 or points.shape[1] != 3:
+        raise OrientationTransformError("indices must have shape (N, 3)")
+    shape = np.asarray(source_shape, dtype=np.int64)
+    if shape.shape != (3,) or np.any(shape <= 0):
+        raise OrientationTransformError(
+            "source_shape must contain three positive dimensions"
+        )
+    if np.any(points < 0) or np.any(points >= shape[None, :]):
+        raise OrientationTransformError("indices fall outside source_shape")
+    transform = _validate_signed_permutation(
+        source_to_target, "spatial transform"
+    )
+    source_axes = np.argmax(np.abs(transform), axis=1)
+    oriented_shape = shape[source_axes]
+    mapped = np.empty_like(points)
+    valid = np.ones(len(points), dtype=bool)
+    for target_axis, source_axis_value in enumerate(source_axes):
+        source_axis = int(source_axis_value)
+        source_index = points[:, source_axis]
+        size = int(shape[source_axis])
+        if transform[target_axis, source_axis] > 0:
+            target_index = source_index
+        elif size % 2:
+            target_index = size - 1 - source_index
+        else:
+            target_index = size - source_index
+            valid &= source_index != 0
+        mapped[:, target_axis] = target_index
+    if target_shape is not None:
+        target = np.asarray(target_shape, dtype=np.int64)
+        if target.shape != (3,) or np.any(target < oriented_shape):
+            raise OrientationTransformError(
+                "target_shape must contain the reoriented source grid"
+            )
+        mapped += ((target - oriented_shape) // 2)[None, :]
+    return np.asarray(mapped, dtype=np.int32), valid

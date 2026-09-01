@@ -108,6 +108,9 @@ coils:
   axis_order: [X, Y, Z]
   normalize: false
 
+encoding:
+  target_fov_mm: [500.0, 150.0, 250.0]
+
 undersampling:
   enabled: false
   frame_duration_s: 0.050

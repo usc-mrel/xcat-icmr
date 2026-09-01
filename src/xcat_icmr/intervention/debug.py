@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from scipy.io import loadmat, savemat
 
+from xcat_icmr.cache import contrast_frame_path, contrast_profile_path
+
 from xcat_icmr.intervention.balloon import (
     SparseBalloonSupport,
     rasterize_sparse_balloon,
@@ -168,11 +170,7 @@ def generate_balloon_debug_frames(
     voxel_size = config.phantom.voxel_size_mm
     output_directory = config.run.output_root / "intervention" / "balloon_debug"
     output_directory.mkdir(parents=True, exist_ok=True)
-    profile_path = (
-        config.run.output_root
-        / "contrast"
-        / f"phantom_{config.run.id}_rf_slice_profile.mat"
-    )
+    profile_path = contrast_profile_path(config)
     sequence = read_sequence(config.sequence)
     carrier = _blood_properties(config)
     concentration = balloon.contrast_agent.concentration.value_mM
@@ -187,14 +185,7 @@ def generate_balloon_debug_frames(
         planned = frame_plan.frames[zero_based_tissue]
         if planned.label_path is None:
             raise BalloonDebugError("the XCAT frame has no saved label path")
-        contrast_path = (
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_{planned.index}_"
-                f"{config.sequence.contrast.model}.mat"
-            )
-        )
+        contrast_path = contrast_frame_path(config, planned.index)
         labels = _load_mat_array(planned.label_path, "P")
         tissue = np.asarray(
             _load_mat_array(contrast_path, "image"), dtype=np.float32
@@ -399,12 +390,7 @@ def generate_balloon_path_debug(
         Path(contrast_path_override)
         if contrast_path_override is not None
         else (
-            config.run.output_root
-            / "contrast"
-            / (
-                f"phantom_{config.run.id}_act_{planned.index}_"
-                f"{config.sequence.contrast.model}.mat"
-            )
+            contrast_frame_path(config, planned.index)
         )
     )
     labels = _load_mat_array(planned.label_path, "P")
@@ -418,9 +404,7 @@ def generate_balloon_path_debug(
         Path(profile_path_override)
         if profile_path_override is not None
         else (
-            config.run.output_root
-            / "contrast"
-            / f"phantom_{config.run.id}_rf_slice_profile.mat"
+            contrast_profile_path(config)
         )
     )
     flip = sample_sparse_flip_angles(profile_path, union_support)

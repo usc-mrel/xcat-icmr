@@ -63,6 +63,7 @@ def test_loads_valid_configuration_and_resolves_paths(tmp_path: Path) -> None:
     assert config.sequence.rf_profile.center_shift_mm == 0.0
     assert config.outputs.save_gt_contrast is True
     assert config.outputs.save_fullysampled_contrast is True
+    assert config.encoding.target_fov_mm == (500.0, 150.0, 250.0)
 
 
 def test_expands_environment_variables(

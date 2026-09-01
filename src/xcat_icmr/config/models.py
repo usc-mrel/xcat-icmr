@@ -271,6 +271,12 @@ class CoilsConfig(ConfigModel):
         return self
 
 
+class EncodingConfig(ConfigModel):
+    """Target physical grid for fully sampled forward/adjoint encoding."""
+
+    target_fov_mm: tuple[PositiveFloat, PositiveFloat, PositiveFloat]
+
+
 class UndersamplingConfig(ConfigModel):
     enabled: bool
     frame_duration_s: PositiveFloat
@@ -295,6 +301,7 @@ class SimulationConfig(ConfigModel):
     phantom: PhantomConfig
     intervention: InterventionConfig
     coils: CoilsConfig
+    encoding: EncodingConfig
     undersampling: UndersamplingConfig
     noise: NoiseConfig
 

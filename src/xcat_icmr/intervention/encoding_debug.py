@@ -124,6 +124,10 @@ def validate_balloon_kspace_linearity(
     logical_voxel = np.abs(transforms.pcs_to_logical) @ pcs_voxel
     shift_mm = float(config.sequence.rf_profile.center_shift_mm)
     shift_tag = f"{shift_mm:g}".replace("-", "m").replace(".", "p")
+    diameter_tag = "x".join(
+        f"{float(value):g}".replace(".", "p")
+        for value in balloon.geometry.diameter_mm
+    )
 
     debug_directory = config.run.output_root / "intervention" / "balloon_debug"
     variant_directory = debug_directory / f"rf_shift_{shift_tag}mm"
@@ -132,7 +136,8 @@ def validate_balloon_kspace_linearity(
         f"tissue_frame_0001_rf_shift_{shift_tag}mm.mat"
     )
     delta_path = variant_directory / (
-        f"gd_delta_frame_0001_A_rf_shift_{shift_tag}mm.mat"
+        f"gd_delta_frame_0001_A_rf_shift_{shift_tag}mm_"
+        f"diameter_{diameter_tag}mm.mat"
     )
 
     profile = generate_slice_profile(
@@ -314,7 +319,10 @@ def validate_balloon_kspace_linearity(
         config.run.output_root
         / "kspace"
         / "debug"
-        / f"shifted_high_resolution_gt_frame_0001_gd_A_rf_shift_{shift_tag}mm.mat"
+        / (
+            f"shifted_high_resolution_gt_frame_0001_gd_A_"
+            f"rf_shift_{shift_tag}mm_diameter_{diameter_tag}mm.mat"
+        )
     )
     _save_shifted_ground_truth(
         shifted_combined,
@@ -328,7 +336,10 @@ def validate_balloon_kspace_linearity(
         config.run.output_root
         / "kspace"
         / "debug"
-        / f"gd_balloon_linearity_frame_0001_rf_shift_{shift_tag}mm.mat"
+        / (
+            f"gd_balloon_linearity_frame_0001_rf_shift_{shift_tag}mm_"
+            f"diameter_{diameter_tag}mm.mat"
+        )
     )
     nonfinite = sum(
         int(np.count_nonzero(~np.isfinite(values)))
