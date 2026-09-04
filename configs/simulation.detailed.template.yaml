@@ -1,0 +1,244 @@
+# XCAT-iCMR simulation configuration
+#
+# Copy this file before editing:
+#
+#   cp configs/simulation.template.yaml configs/my_simulation.yaml
+
+schema_version: 1
+
+# -------------------------------------------------------------------------------------------------
+# Run and execution
+# -------------------------------------------------------------------------------------------------
+run:
+  id: 26-07-25
+  # Paths are resolved relative to this YAML file. Since user configurations
+  # live in configs/, ../outputs places results under the project root.
+  output_root: ../outputs/26-07-25
+
+compute:
+  # -1 selects CPU; 0, 1, ... select a GPU by device ID.
+  device_id: 0
+
+# Installation-specific resources that normally remain unchanged between runs.
+resources:
+  xcat:
+    executable: /server/home/yagiz/CardiacXCATSim/thirdparty/XCAT_V2_LINUX/dxcat2_linux_64bit
+    parameter_template: /server/home/yagiz/CardiacXCATSim/thirdparty/XCAT_V2_LINUX/1slice_1phase.par
+
+# Control which reusable simulation products are retained. File formats and
+# naming conventions are internal XCAT-iCMR defaults.
+outputs:
+  save_tissue_labels: true
+  # Export the complete PCS label cycle as one uint16 4-D NRRD for 3D Slicer.
+  save_tissue_labels_nrrd: true
+  # Select one verified label frame every 50 ms (every tenth 5 ms frame).
+  tissue_labels_nrrd_time_step_s: 0.050
+  # High-resolution contrast on the cropped 1 mm XCAT grid.
+  save_gt_contrast: false
+  # Coarser trajectory-resolution contrast reconstructed from fully sampled
+  # simulated k-space. This output is implemented with the production k-space stage.
+  save_fullysampled_contrast: true
+  # The forward NUFFT is always evaluated. Retain its large per-frame k-space
+  # only when explicitly requested; otherwise discard it after the adjoint.
+  save_fully_sampled_kspace: false
+  retain_xcat_binary_files: false
+  # Store the reusable all-arm, all-coil tissue library. For the current SPI
+  # trajectory and 200 cardiac phases this is expected to occupy about 47 GB.
+  cache_full_tissue_kspace_library: true
+  # High-resolution bSSFP is normally transient while building that library.
+  save_debug_contrast_frame: true
+  debug_contrast_frame: 1
+
+# -------------------------------------------------------------------------------------------------
+# Scanner and sequence
+# -------------------------------------------------------------------------------------------------
+scanner:
+  field_strength_t: 0.55
+  effects:
+    off_resonance:
+      enabled: false
+      field_map: null
+    concomitant_fields:
+      enabled: false
+    gradient_nonlinearity:
+      enabled: false
+
+#spiral_trueFISP_inplane_linear_nrinter_16_rotplanes_ga_nrplanes_144_Tread3.00_TR5.17ms_FA65_xcat_2.5_ga_linear.seq
+sequence:
+  folder: /server/home/yagiz/rtspiral_pypulseq/seq_pp_sweep
+  file: SPI_trueFISP_slab_100mm_vieworder_projmode_fs_radial_plane_GA_hex_spiral_inplane_linear_FA_65.seq
+  metadata_directory: /server/home/yagiz/rtspiral_pypulseq/seq_meta_sweep
+
+  # TE, TR, flip angle, FOV, resolution, trajectory, and DCF are read from
+  # sequence metadata.
+  coordinate_mode: XYZ-in-TRA
+  orientation: COR
+  rf_profile:
+    # Signed displacement along the RF-selection direction, which is derived
+    # from the Pulseq gradient channel and coordinate transforms. For this
+    # sequence it maps to +Sag (LR, toward Left).
+    # The selection gradient and phantom remain fixed; only RF phase is shifted.
+    center_shift_mm: 15.0
+
+  contrast:
+    model: bssfp
+    tissue_library: legacy-matlab-0p55t
+
+# -------------------------------------------------------------------------------------------------
+# Simulation timeline
+# -------------------------------------------------------------------------------------------------
+timeline:
+  # "auto" is the time required to traverse the complete cubic Gd path at
+  # the internal reference speed of 0.5 cm/s. This is independent of the
+  # configured balloon movement velocity below. Use a number for fixed time.
+  duration_s: auto
+
+  # Resolution of the reusable high-resolution periodic XCAT anatomy.
+  xcat_time_step_s: 0.005
+
+  # Resolution of the tissue-only fully sampled reference after encoding.
+  # It is independent of the Pulseq TR and must currently be an integer
+  # multiple of xcat_time_step_s. Actual acquisition sampling will use the
+  # timestamps read from Pulseq rather than matching frames by index.
+  reference_time_step_s: 0.005
+
+  # Combine XCAT anatomy frames when reference_time_step_s is coarser.
+  xcat_to_reference: average  # average | center | trajectory-aware
+
+# -------------------------------------------------------------------------------------------------
+# XCAT phantom and physiological motion
+# -------------------------------------------------------------------------------------------------
+phantom:
+  # HFS uses native XCAT patient coordinates:
+  # +x left, +y posterior, +z superior (LPS).
+  patient_position: HFS
+
+  anatomy:
+    sex: male
+    papillary_muscles: false
+
+  voxel_size_mm: [1.0, 1.0, 1.0]
+  matrix_size_xy: 1024
+
+  # XCAT slice indices are inclusive; this limits head-foot coverage.
+  head_foot_slice_range:
+    start: 1050
+    end: 1519
+
+  # Optional in-plane crops use MATLAB indexing: 1-based and inclusive.
+  # Keep null to retain the complete direction.
+  in_plane_crop:
+    # This cardiac-focused crop does not include the arms entirely.
+    right_left: [300, 735]
+    anterior_posterior: [380, 639]
+
+  transform:
+    additional_rotation_deg_xyz: [0.0, 0.0, 0.0]
+    translation_mm_xyz: [0.0, 0.0, 0.0]
+
+  motion:
+    # no-motion | breath-hold | free-breathing
+    mode: breath-hold
+
+    cardiac:
+      heart_rate_bpm: 60
+      start_phase: 0.0
+
+    respiratory:
+      breaths_per_minute: 12
+      start_phase: 0.4
+      diaphragm_motion_cm: 1.0
+      anterior_posterior_expansion_cm: 0.2
+
+# -------------------------------------------------------------------------------------------------
+# Interventional Gd balloon
+# -------------------------------------------------------------------------------------------------
+intervention:
+  gd_balloon:
+    enabled: true
+
+    path:
+      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_short.json
+      format: 3d-slicer-markups
+      coordinate_system: auto
+      interpolation: cubic-arc-length
+
+    movement:
+      velocity_cm_per_s: 0.5
+      start_time_s: 0.0
+      traversal: one-way  # one-way | round-trip
+
+    geometry:
+      shape: ellipsoid
+      # A spherical balloon with 5 mm radius. The legacy
+      # gen_cath_kspace.py sphere used a 3.5 mm radius (7 mm diameter).
+      diameter_mm: [10.0, 10.0, 10.0]
+
+    contrast_agent:
+      agent: gadolinium
+      carrier_tissue: blood
+      concentration:
+        type: final-concentration
+        value_mM: 1.1
+      relaxivity_library: gd-default
+
+    composition:
+      # Add the balloon signal to the tissue background. This matches the
+      # lightweight legacy catheter model and avoids local tissue subtraction.
+      mode: additive
+
+# -------------------------------------------------------------------------------------------------
+# Coils, undersampling, and noise
+# -------------------------------------------------------------------------------------------------
+coils:
+  enabled: true
+  # This prepared map already excludes original zero-based coils 4 and 7.
+  # No coil selection or removal is performed by the simulation code.
+  sensitivity_map: /server/home/yagiz/CardiacXCATSim/phantom0373_20240221/sens_phantom_ey_interp_16coil.mat
+  # The prepared legacy map is declared in scanner Device Coordinates.
+  # Spatial array dimensions correspond to [X_DCS, Y_DCS, Z_DCS].
+  coordinate_frame: DCS
+  axis_order: [X, Y, Z]
+
+  # Apply voxelwise root-sum-of-squares normalization when the map is loaded.
+  normalize: true
+
+# Physical forward/adjoint FOV in Pulseq logical [x, y, z]. The matrix is
+# derived from this FOV, the sequence resolution, and the measured k extent.
+encoding:
+  target_fov_mm: [500.0, 150.0, 250.0]
+
+# Dynamic acquisition uses a numerical frame duration and a generic integer
+# list mapping each simulation TR to one zero-based trajectory-TR index. The
+# supplied list defines one acquisition cycle and is repeated automatically.
+acquisition:
+  frame_duration_s: 0.055
+  # The 4.97 ms Pulseq TR is snapped to the 5 ms XCAT grid (0.604% mismatch).
+  tr_snap_tolerance_percent: 1.0
+  frame_count: auto
+  incomplete_final_frame: drop
+  view_order:
+    file: view_orders/spi_current_view_order.csv
+    variable: trajectory_tr_index_zero_based
+undersampling:
+  enabled: false
+  frame_duration_s: 0.050
+
+noise:
+  enabled: false
+  snr_db: 30
+  coil_covariance: identity
+  seed: 12345
+
+# -------------------------------------------------------------------------------------------------
+# Derived analysis products
+# -------------------------------------------------------------------------------------------------
+analysis:
+  curved_line_profile:
+    # Automatically analyze each completed fully sampled tissue-plus-Gd reference.
+    enabled: true
+    # Arc-length spacing along the catheter path and transverse search-tube radius.
+    sample_step_mm: 0.5
+    tube_radius_mm: 7.0
+    # Number of angular samples on each transverse sampling ring.
+    angular_samples: 16

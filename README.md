@@ -118,10 +118,13 @@ a different cache ID, so older results remain available.
 The cache is split into three dependency levels:
 
 - `labels/<id>`: one `uint16` XCAT tissue-label cycle.
-- `contrast/<id>`: one real `float32` high-resolution bSSFP tissue cycle.
-- `tissue_kspace/<id>`: per-frame `complex64` fully sampled tissue k-space,
-  shared trajectory metadata, and one `complex64` 4-D low-resolution
-  reference for the complete group.
+- `contrast/<id>`: optional real `float32` high-resolution debug contrast.
+- `tissue_kspace/<id>`: one chunked `complex64` HDF5 file per 5 ms cardiac
+  phase, ordered `[sample, trajectory_TR, coil]`. High-resolution contrast is
+  calculated one phase at a time and discarded after encoding.
+- `dynamic_acquisition/<id>`: the persisted combined tissue-plus-Gd multicoil
+  stream, ordered `[sample, global_TR, coil]`, plus its image-only fully sampled
+  tissue-plus-Gd reference when requested.
 
 Inspect the IDs and whether each level is missing, partial, or complete:
 
@@ -138,32 +141,126 @@ supports it, avoiding a second copy:
 xcat-icmr adopt-legacy-cache configs/my_simulation.yaml
 ```
 
-Generate or resume the fully sampled tissue cache:
+Validate timing, TR snapping, and the complete user-provided view order without
+generating data:
 
 ```bash
-xcat-icmr generate-tissue-kspace-cache configs/my_simulation.yaml
+xcat-icmr plan-acquisition configs/my_simulation.yaml
 ```
 
-The tissue cache honors the two temporal grids in the YAML. For example:
+Preflight storage, then generate or resume the reusable full-trajectory tissue
+library:
+
+```bash
+xcat-icmr generate-tissue-kspace-library configs/my_simulation.yaml --dry-run
+xcat-icmr generate-tissue-kspace-library configs/my_simulation.yaml
+```
+
+The generator refuses to start if the configured large-cache flag is disabled
+or free space is insufficient. Existing valid phase files are reused. The
+current 1500-sample, 1232-arm, 16-coil, 200-phase SPI library is approximately
+44 GiB in raw complex64 storage.
+
+On GPU, the trajectory, RF-centering phase ramp, and all normalized coil-map
+ROIs remain device-resident across cardiac phases. Contrast is uploaded once
+per phase and coils are encoded in batches of four. Only completed k-space
+batches are returned to CPU for checkpointed HDF5 storage. The adjoint stage
+similarly retains its trajectory, DCF, and low-resolution coil maps on GPU and
+downloads only the final coil-combined image.
+
+Reconstruct the actual cached k-space into a resumable, coil-combined 4-D
+adjoint reference before proceeding to the moving-Gd simulation:
+
+```bash
+# Quick validation after generating phase 1
+xcat-icmr generate-tissue-adjoint-reference \
+  configs/my_simulation.yaml --start-frame 1 --end-frame 1
+
+# Complete 200-phase reference
+xcat-icmr generate-tissue-adjoint-reference configs/my_simulation.yaml
+```
+
+The output is `tissue_fullysampled_adjoint_reference_4d.h5`, with complex64
+dataset `image[logical_x, logical_y, logical_z, cardiac_phase]`. The supplied
+DCF is applied before each coil adjoint and normalized sensitivity maps are
+combined as `sum(conj(S) * adjoint_coil)` without a second sensitivity-power
+division. Completed reference phases are reused.
+
+Generate the stored TR-level tissue-plus-Gd acquisition and the separate
+image-only fully sampled reference:
+
+```bash
+xcat-icmr generate-dynamic-acquisition configs/my_simulation.yaml --dry-run
+xcat-icmr generate-dynamic-acquisition configs/my_simulation.yaml
+xcat-icmr generate-dynamic-fullysampled-reference configs/my_simulation.yaml
+```
+
+Before committing to the full experiment, generate exactly one repeatable
+view-order cycle and its frame-wise combined adjoint:
+
+```bash
+xcat-icmr generate-dynamic-acquisition configs/my_simulation.yaml \
+  --view-order-cycles 1 \
+  --save-adjoint-debug
+```
+
+This bounded output is stored below the dynamic-acquisition cache's `debug/`
+directory and never marks the complete experiment as finished. It stores only
+combined tissue-plus-Gd multicoil k-space and the combined frame-wise adjoint;
+separate tissue-only and Gd-only k-space copies are not retained.
+
+The acquisition view-order file contains a nonempty integer list of zero-based
+trajectory-TR indices; it does not require plane or interleave metadata.
+Repeated and omitted indices are valid, and the list cycles automatically over
+the experiment. For every simulation TR, the simulator gathers one trajectory
+TR from the matching periodic tissue phase, evaluates the moving balloon as a
+sparse partial-volume object, encodes only that selected Gd trajectory TR, and
+saves their additive sum. Incomplete final image frames are dropped.
+
+The reference still honors the two tissue-reference grids in the YAML. For
+example:
 
 ```yaml
 timeline:
   xcat_time_step_s: 0.005
-  kspace_time_step_s: 0.010
-  xcat_to_kspace: average
+  reference_time_step_s: 0.010
+  xcat_to_reference: average
 ```
 
-This averages XCAT frames 1-2 before generating k-space frame 1, frames 3-4
-before frame 2, and so on. Averaging occurs on the cropped high-resolution PCS
-grid before orientation and padding, and one multicoil NUFFT is performed per
-aggregated frame. `center` selects the central XCAT frame of each time window.
+This averages XCAT frames 1-2 before generating reference frame 1, frames 3-4
+before reference frame 2, and so on. Averaging occurs on the cropped
+high-resolution PCS grid before orientation and padding, and one multicoil
+forward/adjoint NUFFT is performed per aggregated frame. `center` selects the
+central XCAT frame of each time window.
 `trajectory-aware` is reserved for future sample-time-aware encoding and
 currently raises a not-implemented error. The complete motion cycle must divide
-evenly into the selected k-space time step.
+evenly into the selected reference time step. This tissue-reference interval
+is independent of the Pulseq TR; dynamic acquisition uses exact Pulseq sample
+timestamps.
 
-Each frame MAT file contains only `kspace`, ordered as
-`[sample, arm, coil]`. Shared coordinates, DCF, timing, orientation, and NUFFT
-settings are in `tissue_kspace_metadata.mat`. The low-resolution reference is
-stored once as `fullysampled_reference_4d.h5`; its `image` dataset is ordered
-`[logical_x, logical_y, logical_z, time]`. It can be read in MATLAB with
+The dynamic fully sampled reference averages the tissue states and sparse Gd
+positions within each acquisition frame before producing the final image; this
+models balloon motion blur. Its `image` dataset is ordered
+`[logical_x, logical_y, logical_z,time]`. Temporary full-trajectory reference
+k-space is discarded. The generator reuses the complete approved tissue
+adjoint reference and keeps the full trajectory and normalized coil maps
+resident on the selected GPU while encoding successive Gd frames. Completed
+output frames are resumable and a complete output is returned as a cache hit.
+The HDF5 image can be read in MATLAB with
 `h5read(filename, '/image')` or in Python with `h5py.File(filename)['image']`.
+
+Generate a curved-line intensity profile from that fully sampled reference:
+
+```bash
+xcat-icmr generate-curved-line-profile configs/my_simulation.yaml
+```
+
+The analysis samples the configured catheter path at fixed arc-length spacing
+and records the centerline, mean, and maximum magnitude inside a transverse
+tube at every time frame. It writes a MATLAB file, a time-distance heatmap, a
+geometry overlay, and metadata below the reference's
+`analysis/curved_line_profile/` directory. Set
+`analysis.curved_line_profile.enabled: true` to run it automatically after
+`generate-dynamic-fullysampled-reference`. Use `--input FILE.h5` for a
+compatible alternate reference and `--overwrite` when the analysis inputs or
+settings have changed.

@@ -10,6 +10,7 @@ dist/
 # Local simulation configurations and generated data
 configs/*.yaml
 !configs/simulation.template.yaml
+!configs/simulation.detailed.template.yaml
 outputs/
 *.mat
 *.h5

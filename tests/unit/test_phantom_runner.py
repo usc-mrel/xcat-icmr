@@ -262,7 +262,7 @@ def test_streaming_execution_consumes_and_removes_each_frame(
 ) -> None:
     config = make_runtime(tmp_path)
     config.timeline.xcat_time_step_s = 0.5
-    config.timeline.kspace_time_step_s = 0.5
+    config.timeline.reference_time_step_s = 0.5
     expected = expected_xcat_binary_bytes(config)
     set_fake_executable(
         config,

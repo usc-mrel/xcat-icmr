@@ -296,7 +296,7 @@ def generate_fullysampled_reference(
         raise FullysampledReferenceError("an enabled sensitivity map is required")
     if not config.coils.normalize:
         raise FullysampledReferenceError("coils.normalize must be true")
-    if config.timeline.xcat_to_kspace == "trajectory-aware":
+    if config.timeline.xcat_to_reference == "trajectory-aware":
         raise NotImplementedError(
             "trajectory-aware temporal aggregation is not implemented"
         )
@@ -304,7 +304,7 @@ def generate_fullysampled_reference(
     frame_plan = plan_xcat_frames(config, debug_one_frame=False)
     groups = _temporal_groups(
         frame_plan.frames,
-        frames_per_group=config.timeline.xcat_frames_per_kspace_frame,
+        frames_per_group=config.timeline.xcat_frames_per_reference_frame,
         xcat_time_step_s=config.timeline.xcat_time_step_s,
     )
     total = len(groups)
@@ -463,9 +463,9 @@ def generate_fullysampled_reference(
             [[config.timeline.xcat_time_step_s]], dtype=np.float64
         ),
         "reference_time_step_s": np.asarray(
-            [[config.timeline.kspace_time_step_s]], dtype=np.float64
+            [[config.timeline.reference_time_step_s]], dtype=np.float64
         ),
-        "xcat_to_reference": config.timeline.xcat_to_kspace,
+        "xcat_to_reference": config.timeline.xcat_to_reference,
         "kx_per_m": np.asarray(scaled_k[0], dtype=np.float32),
         "ky_per_m": np.asarray(scaled_k[1], dtype=np.float32),
         "kz_per_m": np.asarray(scaled_k[2], dtype=np.float32),
@@ -525,7 +525,7 @@ def generate_fullysampled_reference(
             ]
             pcs_image = (
                 _average_images(images)
-                if config.timeline.xcat_to_kspace == "average"
+                if config.timeline.xcat_to_reference == "average"
                 else images[len(images) // 2]
             )
             logical_image = reorient_spatial_array(

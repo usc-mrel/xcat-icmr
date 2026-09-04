@@ -5,7 +5,10 @@ import numpy as np
 from xcat_icmr.encoding.sigpy_backend import SigpyNufftBackend
 from xcat_icmr.encoding.trajectory import prepare_physical_sigpy_trajectory
 from xcat_icmr.encoding.validation import circular_shift_to_rf_center
-from xcat_icmr.intervention.roi_encoding import encode_sparse_logical_delta_roi
+from xcat_icmr.intervention.roi_encoding import (
+    PersistentSparseRoiEncoder,
+    encode_sparse_logical_delta_roi,
+)
 
 
 def test_roi_nufft_matches_shifted_full_grid_forward() -> None:
@@ -66,3 +69,72 @@ def test_roi_nufft_matches_shifted_full_grid_forward() -> None:
 
     assert result.applied_shift_voxels == shift
     assert relative_error < 0.01
+
+
+def test_persistent_roi_encoder_matches_existing_encoder() -> None:
+    rng = np.random.default_rng(19)
+    shape = (20, 18, 16)
+    indices = np.asarray(
+        ((8, 7, 6), (9, 7, 6), (9, 8, 7), (10, 8, 7)),
+        dtype=np.int32,
+    )
+    values = np.asarray((0.2, 1.0, 0.5, -0.1), dtype=np.float32)
+    coils = (
+        rng.normal(size=(2,) + shape)
+        + 1j * rng.normal(size=(2,) + shape)
+    ).astype(np.complex64)
+    kx = rng.uniform(-60.0, 60.0, size=(11, 3))
+    ky = rng.uniform(-60.0, 60.0, size=(11, 3))
+    kz = rng.uniform(-60.0, 60.0, size=(11, 3))
+    loader = lambda coil, slices: coils[(coil,) + slices]
+    expected = encode_sparse_logical_delta_roi(
+        indices,
+        values,
+        global_shape=shape,
+        voxel_size_mm=(1.0, 1.0, 1.0),
+        coil_count=2,
+        coil_roi_loader=loader,
+        kx_per_m=kx[:, 1:2],
+        ky_per_m=ky[:, 1:2],
+        kz_per_m=kz[:, 1:2],
+        acquisition_matrix_shape=shape,
+        rf_center_shift_mm=2.0,
+        rf_axis_voxel_size_mm=1.0,
+        rf_logical_axis=2,
+        device_id=-1,
+        minimum_roi_shape=10,
+        roi_margin_voxels=2,
+    )
+    encoder = PersistentSparseRoiEncoder(
+        global_shape=shape,
+        voxel_size_mm=(1.0, 1.0, 1.0),
+        coil_count=2,
+        coil_roi_loader=loader,
+        kx_per_m=kx,
+        ky_per_m=ky,
+        kz_per_m=kz,
+        acquisition_matrix_shape=shape,
+        rf_center_shift_mm=2.0,
+        rf_axis_voxel_size_mm=1.0,
+        rf_logical_axis=2,
+        device_id=-1,
+    )
+    actual = encoder.encode(
+        indices,
+        values,
+        trajectory_tr=1,
+        minimum_roi_shape=10,
+        roi_margin_voxels=2,
+    )
+    np.testing.assert_allclose(actual.kspace, expected.kspace, rtol=1e-6, atol=1e-6)
+
+    full = encoder.encode_full(
+        indices,
+        values,
+        minimum_roi_shape=10,
+        roi_margin_voxels=2,
+    )
+    assert full.kspace.shape == (11, 3, 2)
+    np.testing.assert_allclose(
+        full.kspace[:, 1:2, :], actual.kspace, rtol=1e-6, atol=1e-6
+    )

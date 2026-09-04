@@ -6,7 +6,14 @@ import math
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PositiveFloat,
+    PositiveInt,
+    model_validator,
+)
 
 
 class ConfigModel(BaseModel):
@@ -41,6 +48,9 @@ class OutputsConfig(ConfigModel):
     save_fullysampled_contrast: bool
     save_fully_sampled_kspace: bool
     retain_xcat_binary_files: bool
+    cache_full_tissue_kspace_library: bool = False
+    save_debug_contrast_frame: bool = False
+    debug_contrast_frame: PositiveInt = 1
 
 
 class OffResonanceConfig(ConfigModel):
@@ -94,28 +104,28 @@ Duration = Literal["auto"] | PositiveFloat
 class TimelineConfig(ConfigModel):
     duration_s: Duration
     xcat_time_step_s: PositiveFloat
-    kspace_time_step_s: PositiveFloat
-    xcat_to_kspace: Literal["average", "center", "trajectory-aware"]
+    reference_time_step_s: PositiveFloat
+    xcat_to_reference: Literal["average", "center", "trajectory-aware"]
 
     @model_validator(mode="after")
     def validate_time_steps(self) -> "TimelineConfig":
-        if self.kspace_time_step_s < self.xcat_time_step_s:
+        if self.reference_time_step_s < self.xcat_time_step_s:
             raise ValueError(
-                "kspace_time_step_s must be greater than or equal to "
+                "reference_time_step_s must be greater than or equal to "
                 "xcat_time_step_s"
             )
 
-        ratio = self.kspace_time_step_s / self.xcat_time_step_s
+        ratio = self.reference_time_step_s / self.xcat_time_step_s
         if not math.isclose(ratio, round(ratio), rel_tol=0.0, abs_tol=1e-9):
             raise ValueError(
-                "kspace_time_step_s must be an integer multiple of "
+                "reference_time_step_s must be an integer multiple of "
                 "xcat_time_step_s"
             )
         return self
 
     @property
-    def xcat_frames_per_kspace_frame(self) -> int:
-        return round(self.kspace_time_step_s / self.xcat_time_step_s)
+    def xcat_frames_per_reference_frame(self) -> int:
+        return round(self.reference_time_step_s / self.xcat_time_step_s)
 
 
 class AnatomyConfig(ConfigModel):
@@ -277,6 +287,29 @@ class EncodingConfig(ConfigModel):
     target_fov_mm: tuple[PositiveFloat, PositiveFloat, PositiveFloat]
 
 
+class ViewOrderConfig(ConfigModel):
+    """One repeatable acquisition cycle of trajectory-TR indices."""
+
+    file: Path
+    variable: str = Field(min_length=1)
+    # Kept only so existing YAML files with `repeat: true` still load. New
+    # configurations omit it because cycling is always implicit.
+    repeat: Literal[True] = Field(default=True, exclude=True)
+
+
+FrameCount = Literal["auto"] | PositiveInt
+
+
+class AcquisitionConfig(ConfigModel):
+    """Dynamic acquisition timing and generic trajectory-TR ordering."""
+
+    frame_duration_s: PositiveFloat
+    tr_snap_tolerance_percent: float = Field(ge=0.0, allow_inf_nan=False)
+    frame_count: FrameCount = "auto"
+    incomplete_final_frame: Literal["drop"] = "drop"
+    view_order: ViewOrderConfig
+
+
 class UndersamplingConfig(ConfigModel):
     enabled: bool
     frame_duration_s: PositiveFloat
@@ -287,6 +320,21 @@ class NoiseConfig(ConfigModel):
     snr_db: PositiveFloat
     coil_covariance: Literal["identity"] | Path
     seed: int = Field(ge=0)
+
+
+class CurvedLineProfileConfig(ConfigModel):
+    """Derived time-distance profile along the configured balloon path."""
+
+    enabled: bool = False
+    sample_step_mm: PositiveFloat = 0.5
+    tube_radius_mm: PositiveFloat = 7.0
+    angular_samples: int = Field(default=16, ge=4)
+
+
+class AnalysisConfig(ConfigModel):
+    curved_line_profile: CurvedLineProfileConfig = Field(
+        default_factory=CurvedLineProfileConfig
+    )
 
 
 class SimulationConfig(ConfigModel):
@@ -302,8 +350,10 @@ class SimulationConfig(ConfigModel):
     intervention: InterventionConfig
     coils: CoilsConfig
     encoding: EncodingConfig
+    acquisition: AcquisitionConfig
     undersampling: UndersamplingConfig
     noise: NoiseConfig
+    analysis: AnalysisConfig = Field(default_factory=AnalysisConfig)
 
     @model_validator(mode="after")
     def validate_cross_section_rules(self) -> "SimulationConfig":
@@ -323,6 +373,20 @@ class SimulationConfig(ConfigModel):
         if self.coils.enabled and self.coils.sensitivity_map is None:
             raise ValueError(
                 "coils.sensitivity_map is required when coils are enabled"
+            )
+
+        if (
+            self.outputs.cache_full_tissue_kspace_library
+            and not self.coils.enabled
+        ):
+            raise ValueError(
+                "outputs.cache_full_tissue_kspace_library requires coils.enabled"
+            )
+
+        if balloon.enabled and balloon.composition.mode != "additive":
+            raise ValueError(
+                "the production acquisition currently requires "
+                "intervention.gd_balloon.composition.mode='additive'"
             )
 
         if self.outputs.save_tissue_labels_nrrd:

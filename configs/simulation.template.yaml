@@ -34,7 +34,7 @@ outputs:
   # Select one verified label frame every 50 ms (every tenth 5 ms frame).
   tissue_labels_nrrd_time_step_s: 0.050
   # High-resolution contrast on the cropped 1 mm XCAT grid.
-  save_gt_contrast: true
+  save_gt_contrast: false
   # Coarser trajectory-resolution contrast reconstructed from fully sampled
   # simulated k-space. This output is implemented with the production k-space stage.
   save_fullysampled_contrast: true
@@ -42,6 +42,12 @@ outputs:
   # only when explicitly requested; otherwise discard it after the adjoint.
   save_fully_sampled_kspace: false
   retain_xcat_binary_files: false
+  # Store the reusable all-arm, all-coil tissue library. For the current SPI
+  # trajectory and 200 cardiac phases this is expected to occupy about 47 GB.
+  cache_full_tissue_kspace_library: true
+  # High-resolution bSSFP is normally transient while building that library.
+  save_debug_contrast_frame: true
+  debug_contrast_frame: 1
 
 # -------------------------------------------------------------------------------------------------
 # Scanner and sequence
@@ -87,12 +93,17 @@ timeline:
   # configured balloon movement velocity below. Use a number for fixed time.
   duration_s: auto
 
-  # XCAT anatomy is generated more frequently than the expensive k-space
-  # encoding. The current values average two 5 ms XCAT frames into each
-  # 10 ms k-space frame before coil weighting and NUFFT encoding.
+  # Resolution of the reusable high-resolution periodic XCAT anatomy.
   xcat_time_step_s: 0.005
-  kspace_time_step_s: 0.005
-  xcat_to_kspace: average  # average | center | trajectory-aware
+
+  # Resolution of the tissue-only fully sampled reference after encoding.
+  # It is independent of the Pulseq TR and must currently be an integer
+  # multiple of xcat_time_step_s. Actual acquisition sampling will use the
+  # timestamps read from Pulseq rather than matching frames by index.
+  reference_time_step_s: 0.005
+
+  # Combine XCAT anatomy frames when reference_time_step_s is coarser.
+  xcat_to_reference: average  # average | center | trajectory-aware
 
 # -------------------------------------------------------------------------------------------------
 # XCAT phantom and physiological motion
@@ -147,7 +158,7 @@ intervention:
     enabled: true
 
     path:
-      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_extended_reversed.json
+      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_short.json
       format: 3d-slicer-markups
       coordinate_system: auto
       interpolation: cubic-arc-length
@@ -172,7 +183,9 @@ intervention:
       relaxivity_library: gd-default
 
     composition:
-      mode: replace-background
+      # Add the balloon signal to the tissue background. This matches the
+      # lightweight legacy catheter model and avoids local tissue subtraction.
+      mode: additive
 
 # -------------------------------------------------------------------------------------------------
 # Coils, undersampling, and noise
@@ -195,6 +208,19 @@ coils:
 encoding:
   target_fov_mm: [500.0, 150.0, 250.0]
 
+# Dynamic acquisition uses a numerical frame duration and a generic integer
+# list mapping each simulation TR to one zero-based trajectory-TR index. The
+# supplied list defines one acquisition cycle and is repeated automatically.
+acquisition:
+  frame_duration_s: 0.055
+  # The 4.97 ms Pulseq TR is snapped to the 5 ms XCAT grid (0.604% mismatch).
+  tr_snap_tolerance_percent: 1.0
+  frame_count: auto
+  incomplete_final_frame: drop
+  view_order:
+    file: view_orders/spi_current_view_order.csv
+    variable: trajectory_tr_index_zero_based
+
 undersampling:
   enabled: false
   frame_duration_s: 0.050
@@ -204,3 +230,16 @@ noise:
   snr_db: 30
   coil_covariance: identity
   seed: 12345
+
+# -------------------------------------------------------------------------------------------------
+# Derived analysis products
+# -------------------------------------------------------------------------------------------------
+analysis:
+  curved_line_profile:
+    # Automatically analyze each completed fully sampled tissue-plus-Gd reference.
+    enabled: true
+    # Arc-length spacing along the catheter path and transverse search-tube radius.
+    sample_step_mm: 0.5
+    tube_radius_mm: 7.0
+    # Number of angular samples on each transverse sampling ring.
+    angular_samples: 16

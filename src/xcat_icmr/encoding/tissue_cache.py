@@ -60,7 +60,7 @@ class TissueKspaceCacheResult:
     manifest_path: Path | None
     xcat_frame_count: int
     total_frame_count: int
-    xcat_frames_per_kspace_frame: int
+    xcat_frames_per_reference_frame: int
     aggregation_method: str
     selected_frame_count: int
     generated_frame_count: int
@@ -98,7 +98,7 @@ def _build_temporal_groups(
         if len(frames) % frames_per_group:
             raise TissueKspaceCacheError(
                 f"{len(frames)} XCAT frames cannot be divided into uniform "
-                f"groups of {frames_per_group}; choose a kspace_time_step_s "
+                f"groups of {frames_per_group}; choose a reference_time_step_s "
                 "that divides the complete motion cycle"
             )
         groups = tuple(
@@ -253,7 +253,7 @@ def generate_tissue_kspace_cache(
         raise TissueKspaceCacheError("an enabled sensitivity map is required")
     if not config.coils.normalize:
         raise TissueKspaceCacheError("coils.normalize must be true")
-    aggregation_method = config.timeline.xcat_to_kspace
+    aggregation_method = config.timeline.xcat_to_reference
     if aggregation_method == "trajectory-aware":
         raise NotImplementedError(
             "trajectory-aware XCAT-to-k-space aggregation is not implemented"
@@ -261,7 +261,7 @@ def generate_tissue_kspace_cache(
 
     frames = plan_xcat_frames(config, debug_one_frame=False)
     xcat_frame_count = len(frames.frames)
-    frames_per_group = config.timeline.xcat_frames_per_kspace_frame
+    frames_per_group = config.timeline.xcat_frames_per_reference_frame
     temporal_groups = _build_temporal_groups(
         frames.frames,
         frames_per_group=frames_per_group,
@@ -520,13 +520,13 @@ def generate_tissue_kspace_cache(
             "xcat_time_step_s": np.asarray(
                 [[config.timeline.xcat_time_step_s]], dtype=np.float64
             ),
-            "kspace_time_step_s": np.asarray(
-                [[config.timeline.kspace_time_step_s]], dtype=np.float64
+            "reference_time_step_s": np.asarray(
+                [[config.timeline.reference_time_step_s]], dtype=np.float64
             ),
-            "xcat_frames_per_kspace_frame": np.asarray(
+            "xcat_frames_per_reference_frame": np.asarray(
                 [[frames_per_group]], dtype=np.int32
             ),
-            "xcat_to_kspace": aggregation_method,
+            "xcat_to_reference": aggregation_method,
             "kspace_shape": np.asarray([expected_kspace_shape], dtype=np.int32),
             "kspace_dtype": "complex64",
             "kx_per_m": np.asarray(scaled_k[0], dtype=np.float32),
@@ -587,7 +587,7 @@ def generate_tissue_kspace_cache(
         manifest_path=manifest_path,
         xcat_frame_count=xcat_frame_count,
         total_frame_count=total,
-        xcat_frames_per_kspace_frame=frames_per_group,
+        xcat_frames_per_reference_frame=frames_per_group,
         aggregation_method=aggregation_method,
         selected_frame_count=resolved_end - start_frame + 1,
         generated_frame_count=generated,
@@ -604,7 +604,7 @@ def format_tissue_kspace_cache(result: TissueKspaceCacheResult) -> str:
         (
             "Tissue-only fully sampled k-space cache",
             f"XCAT frames:       {result.xcat_frame_count}",
-            f"Aggregation:       {result.xcat_frames_per_kspace_frame} XCAT "
+            f"Aggregation:       {result.xcat_frames_per_reference_frame} XCAT "
             f"frame(s), {result.aggregation_method}",
             f"K-space frames:    {result.total_frame_count}",
             f"Selected frames:   {result.selected_frame_count}",

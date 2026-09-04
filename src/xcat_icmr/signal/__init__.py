@@ -19,6 +19,7 @@ from xcat_icmr.signal.matlab_reference import (
     format_bssfp_matlab_comparison,
 )
 from xcat_icmr.signal.rf_contrast import (
+    calculate_rf_profile_bssfp_contrast,
     RfProfileContrastError,
     RfProfileContrastGeneration,
     format_rf_profile_contrast_generation,
@@ -52,6 +53,7 @@ __all__ = [
     "format_contrast_generation",
     "format_rf_profile_contrast_generation",
     "generate_rf_profile_bssfp_contrast",
+    "calculate_rf_profile_bssfp_contrast",
     "generate_slice_profile",
     "generate_bssfp_contrast",
     "read_pulseq_excitation",

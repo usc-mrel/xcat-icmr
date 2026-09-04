@@ -22,9 +22,11 @@ from xcat_icmr.intervention.gd_signal import (
     GdRelaxivity,
     GdSignal,
     GdSignalError,
+    calculate_gd_bssfp_signal,
     calculate_sparse_gd_bssfp_signal,
     gd_relaxation_times_ms,
     sample_sparse_flip_angles,
+    sample_sparse_flip_angles_from_profile,
 )
 
 __all__ = [
@@ -39,6 +41,7 @@ __all__ = [
     "GdRelaxivity",
     "GdSignal",
     "GdSignalError",
+    "calculate_gd_bssfp_signal",
     "calculate_sparse_gd_bssfp_signal",
     "centered_origin_lps_mm",
     "cubic_path_length_mm",
@@ -48,4 +51,5 @@ __all__ = [
     "rasterize_sparse_balloon",
     "resolve_simulation_duration",
     "sample_sparse_flip_angles",
+    "sample_sparse_flip_angles_from_profile",
 ]

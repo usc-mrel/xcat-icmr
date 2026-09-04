@@ -14,10 +14,21 @@ from xcat_icmr.config.validation import format_summary, validate_paths
 
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "valid_simulation.yaml"
+PROJECT_ROOT = Path(__file__).parents[2]
 
 
 def fixture_data() -> dict:
     return yaml.safe_load(FIXTURE.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "template_name",
+    ("simulation.template.yaml", "simulation.detailed.template.yaml"),
+)
+def test_shipped_templates_load(template_name: str) -> None:
+    config = load_config(PROJECT_ROOT / "configs" / template_name)
+    assert config.timeline.xcat_time_step_s == pytest.approx(0.005)
+    assert config.timeline.reference_time_step_s == pytest.approx(0.005)
 
 
 def write_config(tmp_path: Path, data: dict) -> Path:
@@ -42,6 +53,9 @@ def create_required_resources(config_path: Path) -> None:
     executable.chmod(0o755)
     (xcat_dir / "template.par").write_text("template\n", encoding="utf-8")
     (sequence_dir / "test.seq").write_text("sequence\n", encoding="utf-8")
+    (base / "resources" / "view_order.csv").write_text(
+        "trajectory_tr_index_zero_based\n0\n", encoding="utf-8"
+    )
 
 
 def assert_invalid(data: dict, expected_text: str) -> None:
@@ -59,7 +73,7 @@ def test_loads_valid_configuration_and_resolves_paths(tmp_path: Path) -> None:
     assert config.sequence.resolved_file == (
         path.parent / "resources" / "sequence" / "test.seq"
     )
-    assert config.timeline.xcat_frames_per_kspace_frame == 10
+    assert config.timeline.xcat_frames_per_reference_frame == 10
     assert config.sequence.rf_profile.center_shift_mm == 0.0
     assert config.outputs.save_gt_contrast is True
     assert config.outputs.save_fullysampled_contrast is True
@@ -104,9 +118,9 @@ def test_free_breathing_requires_frequency() -> None:
     assert_invalid(data, "breaths_per_minute is required")
 
 
-def test_kspace_step_must_be_integer_multiple() -> None:
+def test_reference_step_must_be_integer_multiple() -> None:
     data = fixture_data()
-    data["timeline"]["kspace_time_step_s"] = 0.047
+    data["timeline"]["reference_time_step_s"] = 0.047
     assert_invalid(data, "integer multiple")
 
 
@@ -166,7 +180,7 @@ def test_summary_contains_resolved_timing() -> None:
 
     assert "XCAT time step:" in summary
     assert "5 ms" in summary
-    assert "XCAT frames/k-space frame:" in summary
+    assert "XCAT frames/reference frame:" in summary
     assert "10" in summary
 
 

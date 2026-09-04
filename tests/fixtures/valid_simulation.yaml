@@ -20,6 +20,9 @@ outputs:
   save_fullysampled_contrast: true
   save_fully_sampled_kspace: true
   retain_xcat_binary_files: false
+  cache_full_tissue_kspace_library: false
+  save_debug_contrast_frame: false
+  debug_contrast_frame: 1
 
 scanner:
   field_strength_t: 0.55
@@ -47,8 +50,8 @@ sequence:
 timeline:
   duration_s: 1.0
   xcat_time_step_s: 0.005
-  kspace_time_step_s: 0.050
-  xcat_to_kspace: average
+  reference_time_step_s: 0.050
+  xcat_to_reference: average
 
 phantom:
   patient_position: HFS
@@ -110,6 +113,15 @@ coils:
 
 encoding:
   target_fov_mm: [500.0, 150.0, 250.0]
+
+acquisition:
+  frame_duration_s: 0.055
+  tr_snap_tolerance_percent: 1.0
+  frame_count: auto
+  incomplete_final_frame: drop
+  view_order:
+    file: resources/view_order.csv
+    variable: trajectory_tr_index_zero_based
 
 undersampling:
   enabled: false

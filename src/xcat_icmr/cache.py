@@ -30,6 +30,7 @@ CacheKind = Literal[
     "tissue_kspace",
     "fullysampled_reference",
     "gd_kspace",
+    "dynamic_acquisition",
 ]
 CACHE_SCHEMA_VERSION = 1
 CACHE_ID_LENGTH = 16
@@ -255,13 +256,15 @@ def tissue_kspace_cache_entry(config: SimulationConfig) -> ArtifactCacheEntry:
         "cache_schema": CACHE_SCHEMA_VERSION,
         "kind": "tissue_kspace",
         "storage_dtype": "complex64",
-        "reference": {
-            "format": "hdf5",
-            "layout": "logical_x,logical_y,logical_z,time",
-            "resampling": "linear-image-space",
+        "storage": {
+            "format": "hdf5-per-cardiac-phase",
+            # Preserve this legacy cache-signature token so the terminology
+            # change does not invalidate expensive tissue k-space libraries.
+            "layout": "sample,trajectory_arm,coil",
+            "chunking": "one-arm-all-samples-all-coils",
             "dtype": "complex64",
         },
-        "encoding_algorithm": 5,
+        "encoding_algorithm": 6,
         "contrast_cache_id": contrast.cache_id,
         "sequence_file": _content_file_signature(
             config.sequence.resolved_file, checksum_root=checksum_root
@@ -272,14 +275,7 @@ def tissue_kspace_cache_entry(config: SimulationConfig) -> ArtifactCacheEntry:
         "coordinate_mode": config.sequence.coordinate_mode,
         "orientation": config.sequence.orientation,
         "patient_position": config.phantom.patient_position,
-        "temporal_aggregation": {
-            "xcat_time_step_s": config.timeline.xcat_time_step_s,
-            "kspace_time_step_s": config.timeline.kspace_time_step_s,
-            "xcat_frames_per_kspace_frame": (
-                config.timeline.xcat_frames_per_kspace_frame
-            ),
-            "method": config.timeline.xcat_to_kspace,
-        },
+        "cardiac_phase_time_step_s": config.timeline.xcat_time_step_s,
         "coils": config.coils.model_dump(
             mode="json", exclude={"sensitivity_map"}
         ),
@@ -287,14 +283,14 @@ def tissue_kspace_cache_entry(config: SimulationConfig) -> ArtifactCacheEntry:
             config.coils.sensitivity_map, checksum_root=checksum_root
         ),
         "encoding": {
-            "fov_mm": [500.0, 500.0, 500.0],
-            "resolution_mm": 3.5,
-            "matrix_shape": [144, 144, 144],
+            "target_fov_mm": list(config.encoding.target_fov_mm),
+            "resolution_source": "pulseq-sequence-metadata",
             "trajectory_scale": "isotropic-radius-to-resolution",
             "backend": "sigpy",
             "oversampling": DEFAULT_NUFFT_OVERSAMPLING,
             "kernel_width": DEFAULT_NUFFT_KERNEL_WIDTH,
             "rf_center_shift_mm": config.sequence.rf_profile.center_shift_mm,
+            "contrast_lifetime": "transient-per-phase",
         },
     }
     return _artifact_entry(config, "tissue_kspace", payload)
@@ -332,11 +328,11 @@ def fullysampled_reference_cache_entry(
         "rf_shift_application": "already-in-high-resolution-contrast",
         "temporal_aggregation": {
             "xcat_time_step_s": config.timeline.xcat_time_step_s,
-            "reference_time_step_s": config.timeline.kspace_time_step_s,
+            "reference_time_step_s": config.timeline.reference_time_step_s,
             "xcat_frames_per_reference_frame": (
-                config.timeline.xcat_frames_per_kspace_frame
+                config.timeline.xcat_frames_per_reference_frame
             ),
-            "method": config.timeline.xcat_to_kspace,
+            "method": config.timeline.xcat_to_reference,
         },
         "coils": config.coils.model_dump(
             mode="json", exclude={"sensitivity_map"}
@@ -378,6 +374,37 @@ def gd_kspace_cache_entry(config: SimulationConfig) -> ArtifactCacheEntry:
         },
     }
     return _artifact_entry(config, "gd_kspace", payload)
+
+
+def dynamic_acquisition_cache_entry(config: SimulationConfig) -> ArtifactCacheEntry:
+    """Resolve the persisted combined tissue-plus-Gd TR stream."""
+
+    tissue = tissue_kspace_cache_entry(config)
+    checksum_root = cache_root(config)
+    balloon = config.intervention.gd_balloon.model_dump(mode="json")
+    balloon["path"]["control_points_file"] = _content_file_signature(
+        config.intervention.gd_balloon.path.control_points_file,
+        checksum_root=checksum_root,
+    )
+    payload: dict[str, object] = {
+        "cache_schema": CACHE_SCHEMA_VERSION,
+        "kind": "dynamic_acquisition",
+        "storage_dtype": "complex64",
+        "generation_algorithm": 1,
+        "tissue_kspace_cache_id": tissue.cache_id,
+        "acquisition": config.acquisition.model_dump(mode="json", exclude={"view_order"}),
+        "view_order": {
+            "variable": config.acquisition.view_order.variable,
+            "repeat": True,
+            "file": _content_file_signature(
+                config.acquisition.view_order.file, checksum_root=checksum_root
+            ),
+        },
+        "simulation_duration": config.timeline.duration_s,
+        "balloon": balloon,
+        "composition": "tissue_selected_arm + additive_sparse_gd_selected_arm",
+    }
+    return _artifact_entry(config, "dynamic_acquisition", payload)
 
 
 def label_frame_path(config: SimulationConfig, frame_index: int) -> Path:

@@ -22,6 +22,7 @@ from xcat_icmr.encoding import (
     scale_isotropic_trajectory_to_resolution,
     validate_sigpy_reference,
 )
+from xcat_icmr.encoding.sigpy_backend import SigpyNufftSession
 
 
 def test_default_nufft_oversampling_is_one_point_five() -> None:
@@ -202,6 +203,46 @@ def test_sigpy_matches_direct_dft_and_is_a_paired_adjoint() -> None:
     assert report.direct_dft_relative_error < 1e-2
     assert report.impulse_magnitude_spread < 1e-3
     assert report.adjoint_relative_error < 1e-5
+
+
+def test_persistent_session_batches_match_individual_cpu_nuffts() -> None:
+    rng = np.random.default_rng(7)
+    images = (
+        rng.normal(size=(2, 8, 8, 8))
+        + 1j * rng.normal(size=(2, 8, 8, 8))
+    ).astype(np.complex64)
+    samples, arms = 10, 3
+    kx = rng.uniform(-20, 20, size=(samples, arms))
+    ky = rng.uniform(-20, 20, size=(samples, arms))
+    kz = rng.uniform(-20, 20, size=(samples, arms))
+    trajectory = prepare_physical_sigpy_trajectory(
+        kx,
+        ky,
+        kz,
+        fov_mm=(100, 100, 100),
+        matrix_shape=(8, 8, 8),
+    )
+    backend = SigpyNufftBackend(device_id=-1)
+    session = SigpyNufftSession(trajectory, device_id=-1)
+    device_images = session.upload(images, dtype=np.complex64)
+    batched_forward = session.download(
+        session.forward_device(device_images)
+    )
+    individual_forward = np.stack(
+        [backend.forward(image, trajectory) for image in images]
+    )
+    np.testing.assert_allclose(
+        batched_forward, individual_forward, atol=1e-6, rtol=1e-6
+    )
+    batched_adjoint = session.download(
+        session.adjoint_device(session.upload(batched_forward))
+    )
+    individual_adjoint = np.stack(
+        [backend.adjoint(values, trajectory) for values in individual_forward]
+    )
+    np.testing.assert_allclose(
+        batched_adjoint, individual_adjoint, atol=1e-6, rtol=1e-6
+    )
 
 
 def test_gpu_request_without_cupy_is_explicit(

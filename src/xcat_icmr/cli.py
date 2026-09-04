@@ -12,6 +12,25 @@ import numpy as np
 from pydantic import ValidationError
 from scipy.io import loadmat, whosmat
 
+from xcat_icmr.acquisition import (
+    AcquisitionScheduleError,
+    build_acquisition_schedule,
+    estimate_dynamic_acquisition_storage,
+)
+from xcat_icmr.acquisition.dynamic import (
+    DynamicAcquisitionError,
+    format_dynamic_acquisition,
+    generate_dynamic_acquisition,
+)
+from xcat_icmr.acquisition.reference import (
+    generate_dynamic_fullysampled_reference,
+)
+from xcat_icmr.analysis import (
+    CurvedLineProfileError,
+    format_curved_line_profile,
+    generate_curved_line_profile,
+)
+
 from xcat_icmr.cache import (
     artifact_cache_status,
     contrast_cache_entry,
@@ -67,6 +86,16 @@ from xcat_icmr.encoding import (
     save_logical_input_preview,
     validate_sigpy_reference,
     validate_image_reference,
+)
+from xcat_icmr.encoding.tissue_library import (
+    TissueKspaceLibraryError,
+    format_tissue_kspace_library,
+    generate_tissue_kspace_library,
+)
+from xcat_icmr.encoding.tissue_reference import (
+    TissueAdjointReferenceError,
+    format_tissue_adjoint_reference,
+    generate_tissue_adjoint_reference,
 )
 from xcat_icmr.encoding.fullysampled_reference import (
     FullysampledReferenceError,
@@ -642,6 +671,91 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace selected completed reference frames",
     )
+
+    acquisition_plan_parser = subparsers.add_parser(
+        "plan-acquisition",
+        help="validate TR snapping and the generic user view order",
+    )
+    acquisition_plan_parser.add_argument("configuration", type=Path)
+
+    tissue_library_parser = subparsers.add_parser(
+        "generate-tissue-kspace-library",
+        help=(
+            "transiently calculate each contrast phase and persist its full "
+            "multicoil trajectory k-space"
+        ),
+    )
+    tissue_library_parser.add_argument("configuration", type=Path)
+    tissue_library_parser.add_argument("--start-frame", type=int, default=1)
+    tissue_library_parser.add_argument("--end-frame", type=int)
+    tissue_library_parser.add_argument("--overwrite", action="store_true")
+    tissue_library_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show shapes and storage preflight without generating data",
+    )
+
+    tissue_adjoint_parser = subparsers.add_parser(
+        "generate-tissue-adjoint-reference",
+        help=(
+            "reconstruct cached fully sampled tissue k-space into one "
+            "coil-combined 4-D reference"
+        ),
+    )
+    tissue_adjoint_parser.add_argument("configuration", type=Path)
+    tissue_adjoint_parser.add_argument("--start-frame", type=int, default=1)
+    tissue_adjoint_parser.add_argument("--end-frame", type=int)
+    tissue_adjoint_parser.add_argument("--overwrite", action="store_true")
+    tissue_adjoint_parser.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="reconstruct available selected phases and leave missing phases incomplete",
+    )
+
+    dynamic_acquisition_parser = subparsers.add_parser(
+        "generate-dynamic-acquisition",
+        help="gather tissue arms and add sparse moving-Gd k-space at every TR",
+    )
+    dynamic_acquisition_parser.add_argument("configuration", type=Path)
+    dynamic_acquisition_parser.add_argument("--overwrite", action="store_true")
+    dynamic_acquisition_parser.add_argument(
+        "--view-order-cycles",
+        type=int,
+        help=(
+            "generate exactly this many complete view-order cycles in a "
+            "separate debug output"
+        ),
+    )
+    dynamic_acquisition_parser.add_argument(
+        "--save-adjoint-debug",
+        action="store_true",
+        help="save a coil-combined adjoint image for every output frame",
+    )
+    dynamic_acquisition_parser.add_argument(
+        "--dry-run", action="store_true", help="validate and estimate storage only"
+    )
+
+    dynamic_reference_parser = subparsers.add_parser(
+        "generate-dynamic-fullysampled-reference",
+        help="save the motion-averaged fully sampled tissue-plus-Gd image series",
+    )
+    dynamic_reference_parser.add_argument("configuration", type=Path)
+    dynamic_reference_parser.add_argument("--overwrite", action="store_true")
+
+    curved_profile_parser = subparsers.add_parser(
+        "generate-curved-line-profile",
+        help="measure a curved-tube intensity profile in a fully sampled 4-D image",
+    )
+    curved_profile_parser.add_argument("configuration", type=Path)
+    curved_profile_parser.add_argument(
+        "--input",
+        type=Path,
+        help=(
+            "optional fully sampled image HDF5; defaults to the dynamic-acquisition "
+            "cache for this configuration"
+        ),
+    )
+    curved_profile_parser.add_argument("--overwrite", action="store_true")
 
     three_position_parser = subparsers.add_parser(
         "generate-three-position-reference-debug",
@@ -2279,6 +2393,210 @@ def _generate_fullysampled_reference(
     return 2
 
 
+def _plan_acquisition(configuration: Path) -> int:
+    """Resolve the generic TR schedule without allocating simulation arrays."""
+
+    try:
+        config = load_config(configuration)
+        sequence = read_sequence(config.sequence)
+        phases = len(plan_xcat_frames(config, debug_one_frame=False).frames)
+        schedule = build_acquisition_schedule(
+            config,
+            actual_tr_s=sequence.tr_ms * 1e-3,
+            trajectory_tr_count=sequence.arm_count,
+            cardiac_phase_count=phases,
+        )
+        estimate = estimate_dynamic_acquisition_storage(
+            sequence.sample_count,
+            schedule.acquisition_count,
+            inspect_sensitivity_map(config.coils.sensitivity_map).coil_count,
+        )
+        print(
+            "Acquisition schedule\n"
+            f"Pulseq TR:          {schedule.actual_tr_s * 1e3:.6g} ms\n"
+            f"Effective TR:       {schedule.effective_tr_s * 1e3:.6g} ms\n"
+            f"TR mismatch:        {schedule.tr_mismatch_percent:.3f}%\n"
+            f"TRs per frame:      {schedule.trs_per_frame}\n"
+            f"Frame duration:     {schedule.frame_duration_s * 1e3:.6g} ms\n"
+            f"Complete frames:    {schedule.frame_count}\n"
+            f"Retained duration:  {schedule.retained_duration_s:.6g} s\n"
+            f"Dropped tail:       {schedule.dropped_duration_s:.6g} s\n"
+            f"Stored acquisition: {estimate.gib:.2f} GiB complex64\n"
+            f"Trajectory TRs:     {schedule.trajectory_tr_count}\n"
+            f"View-order cycle:   {schedule.view_order_cycle_length} TRs\n"
+            f"Complete cycles:    {schedule.complete_view_order_cycles}\n"
+            f"Partial cycle:      {schedule.partial_view_order_cycle_tr_count} TRs\n"
+            "Plane metadata:     not required"
+        )
+        return 0
+    except (ConfigurationLoadError, ValidationError, AcquisitionScheduleError, SequenceReadError, SensitivityMapError, OSError, ValueError) as exc:
+        print(f"Acquisition planning error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_tissue_kspace_library(
+    configuration: Path,
+    *,
+    start_frame: int,
+    end_frame: int | None,
+    overwrite: bool,
+    dry_run: bool,
+) -> int:
+    """Generate or preflight the resumable full-trajectory tissue library."""
+
+    try:
+        config = load_config(configuration)
+        report = generate_tissue_kspace_library(
+            config,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            overwrite=overwrite,
+            dry_run=dry_run,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_tissue_kspace_library(report))
+        if dry_run:
+            print("Generation:          skipped (--dry-run)")
+        return 0
+    except (ConfigurationLoadError, ValidationError, TissueKspaceLibraryError, SequenceReadError, SensitivityMapError, NufftBackendError, OSError, ValueError) as exc:
+        print(f"Tissue k-space library error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_tissue_adjoint_reference(
+    configuration: Path,
+    *,
+    start_frame: int,
+    end_frame: int | None,
+    overwrite: bool,
+    allow_missing: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        report = generate_tissue_adjoint_reference(
+            config,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            overwrite=overwrite,
+            allow_missing=allow_missing,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_tissue_adjoint_reference(report))
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        TissueAdjointReferenceError,
+        SequenceReadError,
+        SensitivityMapError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Tissue adjoint reference error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_dynamic_acquisition(
+    configuration: Path,
+    *,
+    overwrite: bool,
+    dry_run: bool,
+    view_order_cycles: int | None,
+    save_adjoint_debug: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        report = generate_dynamic_acquisition(
+            config,
+            overwrite=overwrite,
+            dry_run=dry_run,
+            view_order_cycles=view_order_cycles,
+            save_adjoint_debug=save_adjoint_debug,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("\n" + format_dynamic_acquisition(report))
+        if dry_run:
+            print("Generation:          skipped (--dry-run)")
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        DynamicAcquisitionError,
+        AcquisitionScheduleError,
+        SequenceReadError,
+        SensitivityMapError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Dynamic acquisition error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_dynamic_reference(configuration: Path, *, overwrite: bool) -> int:
+    try:
+        config = load_config(configuration)
+        result = generate_dynamic_fullysampled_reference(
+            config,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        print(
+            "\nFully sampled tissue-plus-Gd reference\n"
+            f"Shape:            {result.shape} complex64\n"
+            f"TRs averaged:     {result.trs_averaged_per_frame}\n"
+            f"Generated/reused: {result.generated_frames}/{result.reused_frames}\n"
+            f"Output:           {result.output_path}"
+        )
+        if config.analysis.curved_line_profile.enabled:
+            profile = generate_curved_line_profile(config, overwrite=overwrite)
+            print("\n" + format_curved_line_profile(profile))
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        DynamicAcquisitionError,
+        AcquisitionScheduleError,
+        SequenceReadError,
+        SensitivityMapError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+        CurvedLineProfileError,
+    ) as exc:
+        print(f"Dynamic fully sampled reference error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_curved_line_profile(
+    configuration: Path,
+    *,
+    input_path: Path | None,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        result = generate_curved_line_profile(
+            config,
+            input_path=input_path,
+            overwrite=overwrite,
+        )
+        print(format_curved_line_profile(result))
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        CurvedLineProfileError,
+        AcquisitionScheduleError,
+        SequenceReadError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Curved-line profile error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
 def _generate_three_position_reference_debug(
     configuration: Path,
     *,
@@ -2764,6 +3082,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.configuration,
             start_frame=args.start_frame,
             end_frame=args.end_frame,
+            overwrite=args.overwrite,
+        )
+    if args.command == "plan-acquisition":
+        return _plan_acquisition(args.configuration)
+    if args.command == "generate-tissue-kspace-library":
+        return _generate_tissue_kspace_library(
+            args.configuration,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+        )
+    if args.command == "generate-tissue-adjoint-reference":
+        return _generate_tissue_adjoint_reference(
+            args.configuration,
+            start_frame=args.start_frame,
+            end_frame=args.end_frame,
+            overwrite=args.overwrite,
+            allow_missing=args.allow_missing,
+        )
+    if args.command == "generate-dynamic-acquisition":
+        return _generate_dynamic_acquisition(
+            args.configuration,
+            overwrite=args.overwrite,
+            dry_run=args.dry_run,
+            view_order_cycles=args.view_order_cycles,
+            save_adjoint_debug=args.save_adjoint_debug,
+        )
+    if args.command == "generate-dynamic-fullysampled-reference":
+        return _generate_dynamic_reference(
+            args.configuration, overwrite=args.overwrite
+        )
+    if args.command == "generate-curved-line-profile":
+        return _generate_curved_line_profile(
+            args.configuration,
+            input_path=args.input,
             overwrite=args.overwrite,
         )
     if args.command == "generate-three-position-reference-debug":

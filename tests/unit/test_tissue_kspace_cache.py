@@ -67,7 +67,7 @@ def test_groups_xcat_frames_on_the_configured_kspace_time_grid() -> None:
     frames = plan_xcat_frames(config, debug_one_frame=False)
     groups = _build_temporal_groups(
         frames.frames,
-        frames_per_group=config.timeline.xcat_frames_per_kspace_frame,
+        frames_per_group=config.timeline.xcat_frames_per_reference_frame,
         xcat_time_step_s=config.timeline.xcat_time_step_s,
     )
 

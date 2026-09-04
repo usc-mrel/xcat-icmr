@@ -103,6 +103,12 @@ def validate_paths(config: SimulationConfig) -> list[ValidationIssue]:
             config.coils.sensitivity_map,
         )
 
+    _require_file(
+        issues,
+        "acquisition.view_order.file",
+        config.acquisition.view_order.file,
+    )
+
     if isinstance(config.noise.coil_covariance, Path):
         _require_file(
             issues,
@@ -133,16 +139,25 @@ def format_summary(config: SimulationConfig) -> str:
         ("Motion", config.phantom.motion.mode),
         ("XCAT time step", f"{config.timeline.xcat_time_step_s * 1e3:g} ms"),
         (
-            "K-space time step",
-            f"{config.timeline.kspace_time_step_s * 1e3:g} ms",
+            "Tissue-reference time step",
+            f"{config.timeline.reference_time_step_s * 1e3:g} ms",
         ),
         (
-            "XCAT frames/k-space frame",
-            str(config.timeline.xcat_frames_per_kspace_frame),
+            "XCAT frames/reference frame",
+            str(config.timeline.xcat_frames_per_reference_frame),
         ),
-        ("XCAT aggregation", config.timeline.xcat_to_kspace),
+        ("XCAT aggregation", config.timeline.xcat_to_reference),
         ("Gd balloon", "enabled" if balloon.enabled else "disabled"),
         ("Duration", duration),
+        (
+            "Acquisition frame",
+            f"{config.acquisition.frame_duration_s * 1e3:g} ms",
+        ),
+        (
+            "TR snap tolerance",
+            f"{config.acquisition.tr_snap_tolerance_percent:g}%",
+        ),
+        ("View order", str(config.acquisition.view_order.file)),
         (
             "Undersampling",
             "enabled" if config.undersampling.enabled else "disabled",

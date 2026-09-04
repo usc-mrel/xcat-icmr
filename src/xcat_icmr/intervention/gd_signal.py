@@ -119,8 +119,31 @@ def sample_sparse_flip_angles(
     ).copy()
 
 
-def calculate_sparse_gd_bssfp_signal(
+def sample_sparse_flip_angles_from_profile(
+    applied_effective_flip_angle_deg: np.ndarray,
+    *,
+    pcs_axis: int,
+    pcs_image_shape: tuple[int, int, int],
     support: SparseBalloonSupport,
+) -> np.ndarray:
+    """Broadcast an in-memory applied RF profile over a balloon support."""
+
+    if tuple(pcs_image_shape) != support.volume_shape or pcs_axis not in {0, 1, 2}:
+        raise GdSignalError("in-memory RF profile geometry is incompatible")
+    profile = np.asarray(applied_effective_flip_angle_deg, dtype=np.float64).reshape(-1)
+    if profile.size != support.volume_shape[pcs_axis]:
+        raise GdSignalError("in-memory applied RF profile has the wrong length")
+    start = int(support.bounding_box_start_ijk[pcs_axis])
+    stop = start + support.occupancy.shape[pcs_axis]
+    shape = [1, 1, 1]
+    shape[pcs_axis] = stop - start
+    return np.asarray(
+        np.broadcast_to(profile[start:stop].reshape(shape), support.occupancy.shape),
+        dtype=np.float64,
+    ).copy()
+
+
+def calculate_gd_bssfp_signal(
     *,
     carrier: TissueProperties,
     concentration_mM: float,
@@ -129,14 +152,11 @@ def calculate_sparse_gd_bssfp_signal(
     tr_ms: float,
     relaxivity_library: str = "gd-default",
 ) -> GdSignal:
-    """Calculate Gd signal on the small local balloon box."""
+    """Calculate Gd bSSFP values for a reusable flip-angle array."""
 
     flip = np.asarray(flip_angle_deg, dtype=np.float64)
-    if flip.shape != support.occupancy.shape:
-        raise GdSignalError(
-            f"flip-angle shape {flip.shape} does not match "
-            f"local balloon shape {support.occupancy.shape}"
-        )
+    if not np.all(np.isfinite(flip)):
+        raise GdSignalError("flip-angle array contains non-finite values")
     t1_ms, t2_ms = gd_relaxation_times_ms(
         carrier,
         concentration_mM,
@@ -161,4 +181,32 @@ def calculate_sparse_gd_bssfp_signal(
         t2_ms=float(t2_ms),
         flip_angle_deg=flip,
         values=values,
+    )
+
+
+def calculate_sparse_gd_bssfp_signal(
+    support: SparseBalloonSupport,
+    *,
+    carrier: TissueProperties,
+    concentration_mM: float,
+    flip_angle_deg: np.ndarray,
+    te_ms: float,
+    tr_ms: float,
+    relaxivity_library: str = "gd-default",
+) -> GdSignal:
+    """Calculate Gd signal on the small local balloon box."""
+
+    flip = np.asarray(flip_angle_deg, dtype=np.float64)
+    if flip.shape != support.occupancy.shape:
+        raise GdSignalError(
+            f"flip-angle shape {flip.shape} does not match "
+            f"local balloon shape {support.occupancy.shape}"
+        )
+    return calculate_gd_bssfp_signal(
+        carrier=carrier,
+        concentration_mM=concentration_mM,
+        flip_angle_deg=flip,
+        te_ms=te_ms,
+        tr_ms=tr_ms,
+        relaxivity_library=relaxivity_library,
     )

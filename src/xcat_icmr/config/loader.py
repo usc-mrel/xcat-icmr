@@ -31,6 +31,7 @@ _PATH_LOCATIONS: tuple[tuple[str, ...], ...] = (
         "control_points_file",
     ),
     ("coils", "sensitivity_map"),
+    ("acquisition", "view_order", "file"),
 )
 
 

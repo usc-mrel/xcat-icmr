@@ -151,6 +151,59 @@ def _profile_on_pcs_axis(
     return pcs_axis, magnitude, effective_flip
 
 
+def calculate_rf_profile_bssfp_contrast(
+    *,
+    label_path: str | Path,
+    profile: SliceProfile,
+    transforms: CoordinateTransforms,
+    pcs_voxel_size_mm: tuple[float, float, float],
+    library: TissueLibrary,
+    te_ms: float,
+    tr_ms: float,
+    chunk_slices: int = 8,
+) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
+    """Calculate one float32 contrast volume without writing it to disk."""
+
+    if chunk_slices <= 0:
+        raise RfProfileContrastError("chunk_slices must be positive")
+    _, labels = _load_required_array(label_path, "P")
+    if labels.ndim != 3:
+        raise RfProfileContrastError(
+            f"label image must be three-dimensional; got {labels.shape}"
+        )
+    pcs_shape = tuple(int(value) for value in labels.shape)
+    pcs_axis, magnitude_profile, effective_flip_profile = _profile_on_pcs_axis(
+        profile,
+        transforms,
+        pcs_shape=pcs_shape,
+        pcs_voxel_size_mm=pcs_voxel_size_mm,
+    )
+    broadcast_shape = [1, 1, 1]
+    broadcast_shape[pcs_axis] = pcs_shape[pcs_axis]
+    flip_grid = effective_flip_profile.reshape(broadcast_shape)
+    contrast = np.empty(pcs_shape, dtype=np.float32)
+    try:
+        for start in range(0, pcs_shape[2], chunk_slices):
+            stop = min(start + chunk_slices, pcs_shape[2])
+            properties = map_labels_to_tissue_properties(
+                labels[:, :, start:stop], library, dtype=np.float32
+            )
+            local_flip = flip_grid[:, :, start:stop] if pcs_axis == 2 else flip_grid
+            contrast[:, :, start:stop] = bssfp_signal_from_tissue_properties(
+                properties,
+                flip_angle_deg=local_flip,
+                te_ms=te_ms,
+                tr_ms=tr_ms,
+                off_resonance_enabled=False,
+                dtype=np.float32,
+            )
+    except ValueError as exc:
+        raise RfProfileContrastError(str(exc)) from exc
+    if not np.all(np.isfinite(contrast)):
+        raise RfProfileContrastError("RF-profile contrast contains non-finite values")
+    return contrast, pcs_axis, magnitude_profile, effective_flip_profile
+
+
 def generate_rf_profile_bssfp_contrast(
     *,
     label_path: str | Path,
@@ -168,57 +221,19 @@ def generate_rf_profile_bssfp_contrast(
 ) -> RfProfileContrastGeneration:
     """Generate the sole bSSFP image using the local Pulseq flip angle."""
 
-    if chunk_slices <= 0:
-        raise RfProfileContrastError("chunk_slices must be positive")
-    _, labels = _load_required_array(label_path, "P")
-    if labels.ndim != 3:
-        raise RfProfileContrastError(
-            f"label image must be three-dimensional; got {labels.shape}"
-        )
-    pcs_shape = tuple(int(value) for value in labels.shape)
-    pcs_axis, magnitude_profile, effective_flip_profile = (
-        _profile_on_pcs_axis(
-            profile,
-            transforms,
-            pcs_shape=pcs_shape,
+    effective_flip, pcs_axis, magnitude_profile, effective_flip_profile = (
+        calculate_rf_profile_bssfp_contrast(
+            label_path=label_path,
+            profile=profile,
+            transforms=transforms,
             pcs_voxel_size_mm=pcs_voxel_size_mm,
+            library=library,
+            te_ms=te_ms,
+            tr_ms=tr_ms,
+            chunk_slices=chunk_slices,
         )
     )
-    broadcast_shape = [1, 1, 1]
-    broadcast_shape[pcs_axis] = pcs_shape[pcs_axis]
-    flip_grid = effective_flip_profile.reshape(broadcast_shape)
-
-    effective_flip = np.empty(pcs_shape, dtype=np.float32)
-    try:
-        for start in range(0, pcs_shape[2], chunk_slices):
-            stop = min(start + chunk_slices, pcs_shape[2])
-            properties = map_labels_to_tissue_properties(
-                labels[:, :, start:stop],
-                library,
-                dtype=np.float32,
-            )
-            local_flip = (
-                flip_grid[:, :, start:stop]
-                if pcs_axis == 2
-                else flip_grid
-            )
-            effective_flip[:, :, start:stop] = (
-                bssfp_signal_from_tissue_properties(
-                    properties,
-                    flip_angle_deg=local_flip,
-                    te_ms=te_ms,
-                    tr_ms=tr_ms,
-                    off_resonance_enabled=False,
-                    dtype=np.float32,
-                )
-            )
-    except ValueError as exc:
-        raise RfProfileContrastError(str(exc)) from exc
-
-    if not np.all(np.isfinite(effective_flip)):
-        raise RfProfileContrastError(
-            "RF-profile contrast contains non-finite values"
-        )
+    pcs_shape = tuple(int(value) for value in effective_flip.shape)
 
     profile_variables = {
             "positions_mm": profile.positions_mm.astype(np.float32),

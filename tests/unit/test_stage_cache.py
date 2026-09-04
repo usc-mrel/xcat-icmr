@@ -127,7 +127,7 @@ def test_artifact_dependency_chain_changes_only_downstream() -> None:
     temporally_aggregated = config.model_copy(
         update={
             "timeline": config.timeline.model_copy(
-                update={"kspace_time_step_s": 0.01}
+                update={"reference_time_step_s": 0.01}
             )
         }
     )
@@ -138,7 +138,9 @@ def test_artifact_dependency_chain_changes_only_downstream() -> None:
     )
     assert temporal_ids[0] == baseline[0]
     assert temporal_ids[1] == baseline[1]
-    assert temporal_ids[2] != baseline[2]
+    # The full tissue library is indexed at the XCAT cardiac-phase raster.
+    # Changing only the later image-reference grouping must not invalidate it.
+    assert temporal_ids[2] == baseline[2]
 
 
 def test_artifact_manifest_reports_miss_partial_and_hit(tmp_path: Path) -> None:
