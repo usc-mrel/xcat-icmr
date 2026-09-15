@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="950" viewBox="0 0 1600 950" role="img" aria-labelledby="title desc">
+  <title id="title">XCAT-iCMR simulation, reconstruction, and assessment pipeline</title>
+  <desc id="desc">Simulation inputs generate anatomical tissue and a moving gadolinium balloon, which are encoded into reference and undersampled MRI data, reconstructed, and assessed.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4b5563"/>
+    </marker>
+    <style>
+      .heading { font: 700 28px system-ui, sans-serif; fill: #17202a; }
+      .label { font: 600 20px system-ui, sans-serif; fill: #fff; text-anchor: middle; }
+      .small { font: 500 16px system-ui, sans-serif; fill: #fff; text-anchor: middle; }
+      .caption { font: 500 17px system-ui, sans-serif; fill: #374151; text-anchor: middle; }
+      .input { fill: #35578c; stroke: #29446f; stroke-width: 2; }
+      .process { fill: #aa91b8; stroke: #816d8c; stroke-width: 2; }
+      .data { fill: #82927f; stroke: #637260; stroke-width: 2; }
+      .metric { fill: #b77c66; stroke: #8e5e4c; stroke-width: 2; }
+      .arrow { fill: none; stroke: #4b5563; stroke-width: 3; marker-end: url(#arrow); }
+      .reference-arrow { fill: none; stroke: #637260; stroke-width: 3; stroke-dasharray: 8 6; marker-end: url(#arrow); }
+      .divider { stroke: #c8cdd3; stroke-width: 2; stroke-dasharray: 8 8; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="950" fill="#fff"/>
+  <text class="heading" x="365" y="48" text-anchor="middle">Simulation and acquisition</text>
+  <text class="heading" x="825" y="48" text-anchor="middle">Reconstruction</text>
+  <text class="heading" x="1300" y="48" text-anchor="middle">Image quality assessment</text>
+  <line class="divider" x1="730" y1="25" x2="730" y2="910"/>
+  <line class="divider" x1="1010" y1="25" x2="1010" y2="910"/>
+
+  <!-- Inputs -->
+  <rect class="input" x="35" y="85" rx="12" width="210" height="78"/>
+  <text class="label" x="140" y="116">Simulation YAML</text>
+  <text class="small" x="140" y="142">motion, timing, scanner</text>
+  <rect class="input" x="270" y="85" rx="12" width="190" height="78"/>
+  <text class="label" x="365" y="116">Pulseq + trajectory</text>
+  <text class="small" x="365" y="142">RF, timing, k-space</text>
+  <rect class="input" x="485" y="85" rx="12" width="210" height="78"/>
+  <text class="label" x="590" y="116">Catheter path JSON</text>
+  <text class="small" x="590" y="142">physical control points</text>
+
+  <!-- Tissue branch -->
+  <rect class="process" x="55" y="215" rx="12" width="190" height="66"/>
+  <text class="label" x="150" y="256">Run XCAT</text>
+  <path class="arrow" d="M140 163 V210"/>
+  <rect class="data" x="55" y="325" rx="12" width="190" height="72"/>
+  <text class="label" x="150" y="354">4-D tissue labels</text>
+  <text class="small" x="150" y="380">anatomy + motion</text>
+  <path class="arrow" d="M150 281 V320"/>
+  <rect class="process" x="55" y="445" rx="12" width="190" height="66"/>
+  <text class="label" x="150" y="486">bSSFP contrast</text>
+  <path class="arrow" d="M150 397 V440"/>
+  <path class="arrow" d="M365 163 V182 H225 V210"/>
+
+  <!-- Balloon branch -->
+  <rect class="process" x="485" y="215" rx="12" width="210" height="66"/>
+  <text class="label" x="590" y="244">Interpolate path</text>
+  <text class="small" x="590" y="267">continuous motion</text>
+  <path class="arrow" d="M590 163 V210"/>
+  <rect class="data" x="485" y="325" rx="12" width="210" height="72"/>
+  <text class="label" x="590" y="354">Sparse Gd balloon</text>
+  <text class="small" x="590" y="380">partial-volume signal</text>
+  <path class="arrow" d="M590 281 V320"/>
+
+  <!-- Encoding and acquisition outputs -->
+  <rect class="process" x="270" y="445" rx="12" width="190" height="66"/>
+  <text class="label" x="365" y="473">Multicoil NUFFT</text>
+  <text class="small" x="365" y="496">sensitivity encoding</text>
+  <path class="arrow" d="M245 478 H265"/>
+  <path class="arrow" d="M485 361 H430 V440"/>
+  <path class="arrow" d="M365 163 V440"/>
+  <rect class="data" x="150" y="565" rx="12" width="210" height="76"/>
+  <text class="label" x="255" y="595">Fully sampled</text>
+  <text class="small" x="255" y="620">reference images</text>
+  <path class="arrow" d="M365 511 V535 H255 V560"/>
+
+  <rect class="input" x="405" y="550" rx="12" width="285" height="72"/>
+  <text class="label" x="547" y="580">View-order file</text>
+  <text class="small" x="547" y="605">TR indices · referenced by YAML</text>
+  <rect class="process" x="405" y="660" rx="12" width="285" height="72"/>
+  <text class="label" x="547" y="690">Temporal grouping</text>
+  <text class="small" x="547" y="715">frame duration from simulation YAML</text>
+  <path class="arrow" d="M365 535 H385 V696 H400"/>
+  <path class="arrow" d="M547 622 V655"/>
+  <rect class="data" x="405" y="770" rx="12" width="285" height="76"/>
+  <text class="label" x="547" y="800">Undersampled</text>
+  <text class="small" x="547" y="825">multicoil k-space</text>
+  <path class="arrow" d="M547 732 V765"/>
+
+  <!-- Reconstruction -->
+  <rect class="input" x="755" y="215" rx="12" width="230" height="72"/>
+  <text class="label" x="870" y="245">Reconstruction YAML</text>
+  <text class="small" x="870" y="270">one or many settings</text>
+  <rect class="process" x="755" y="390" rx="12" width="230" height="70"/>
+  <text class="label" x="870" y="420">Modular reconstruction</text>
+  <text class="small" x="870" y="445">causal IRLS</text>
+  <path class="arrow" d="M690 808 H715 V425 H750"/>
+  <path class="arrow" d="M870 287 V385"/>
+  <rect class="data" x="755" y="565" rx="12" width="230" height="76"/>
+  <text class="label" x="870" y="595">Reconstructed</text>
+  <text class="small" x="870" y="620">dynamic 3-D images</text>
+  <path class="arrow" d="M870 460 V560"/>
+
+  <!-- IQA -->
+  <rect class="process" x="1080" y="240" rx="12" width="440" height="74"/>
+  <text class="label" x="1300" y="270">Curved line-intensity profiles</text>
+  <text class="small" x="1300" y="295">ground truth and reconstruction</text>
+  <path class="reference-arrow" d="M360 603 H380 V870 H1040 V262 H1075"/>
+  <text class="caption" x="830" y="895">fully sampled ground truth: assessment only</text>
+  <path class="arrow" d="M985 603 H1055 V292 H1075"/>
+  <rect class="process" x="1080" y="400" rx="12" width="440" height="74"/>
+  <text class="label" x="1300" y="430">Image quality assessment</text>
+  <text class="small" x="1300" y="455">volumetric + catheter-specific</text>
+  <path class="arrow" d="M1300 314 V395"/>
+  <rect class="metric" x="1080" y="565" rx="12" width="440" height="92"/>
+  <text class="label" x="1300" y="596">Metrics and figures</text>
+  <text class="small" x="1300" y="622">SSIM · RMSE · correlation · CNR</text>
+  <text class="small" x="1300" y="645">3-D tracking error · parallel/perpendicular FWHM</text>
+  <path class="arrow" d="M1300 474 V560"/>
+
+  <text class="caption" x="800" y="935">Cache-aware and resumable: compatible artifacts are reused automatically.</text>
+</svg>
