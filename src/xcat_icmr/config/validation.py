@@ -162,6 +162,10 @@ def format_summary(config: SimulationConfig) -> str:
             "Undersampling",
             "enabled" if config.undersampling.enabled else "disabled",
         ),
+        (
+            "Requested temporal resolution",
+            f"{config.undersampling.target_frame_duration_s * 1e3:g} ms",
+        ),
         ("Noise", "enabled" if config.noise.enabled else "disabled"),
     )
     width = max(len(label) for label, _ in lines)

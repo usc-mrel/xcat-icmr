@@ -211,6 +211,39 @@ def generate_tissue_kspace_library(
     end = len(frames) if end_frame is None else end_frame
     if not 1 <= start_frame <= end <= len(frames):
         raise TissueKspaceLibraryError(f"frame interval must lie within 1..{len(frames)}")
+    if plan.existing_valid_frames == len(frames) and not overwrite:
+        valid_paths = [
+            tissue_library_frame_path(config, index)
+            for index in range(1, len(frames) + 1)
+        ]
+        write_artifact_manifest(
+            tissue_kspace_cache_entry(config),
+            status="complete",
+            frame_count=len(frames),
+            completed_frame_indices=list(range(1, len(frames) + 1)),
+            outputs=valid_paths,
+        )
+        manifest = write_stage_manifest(
+            config, "fullysampled_kspace", valid_paths
+        )
+        if progress:
+            progress(
+                "Tissue library: all phases are valid; reused without "
+                "preparing the NUFFT or coil maps"
+            )
+        return TissueKspaceLibraryResult(
+            plan,
+            0,
+            len(frames),
+            (
+                plan.output_directory / "debug_contrast_frame.mat"
+                if config.outputs.save_debug_contrast_frame
+                and (plan.output_directory / "debug_contrast_frame.mat").is_file()
+                else None
+            ),
+            manifest,
+            time.perf_counter() - started,
+        )
     # Invalidate old completion claims before changing any phase. This prevents
     # downstream acquisition stages from consuming a mixture of legacy
     # uncentered and newly RF-centered k-space while regeneration is in flight.

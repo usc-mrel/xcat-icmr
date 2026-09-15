@@ -89,8 +89,24 @@ Validate it without running XCAT or generating simulation data:
 xcat-icmr validate configs/my_simulation.yaml
 ```
 
-The validator checks the YAML schema, relationships between sections, and
-required external files.
+The normal user workflow does not require a separate validation or cache
+inspection command. Run the complete cache-aware simulation pipeline with:
+
+```bash
+xcat-icmr simulate configs/my_simulation.yaml
+```
+
+Validation is performed automatically before any generation starts. Existing
+compatible labels, tissue k-space, references, and acquisitions are reused.
+To inspect the complete resolved plan without generating data, use:
+
+```bash
+xcat-icmr simulate configs/my_simulation.yaml --dry-run
+```
+
+The standalone validator checks the YAML schema, relationships between
+sections, and required external files and remains available for diagnostics.
+The individual generation commands below are advanced stage-level controls.
 
 Inspect the Pulseq signature, resolved MATLAB metadata, and oriented
 trajectory without running the simulation:
@@ -208,6 +224,132 @@ This bounded output is stored below the dynamic-acquisition cache's `debug/`
 directory and never marks the complete experiment as finished. It stores only
 combined tissue-plus-Gd multicoil k-space and the combined frame-wise adjoint;
 separate tissue-only and Gd-only k-space copies are not retained.
+
+The canonical acquisition frame duration is defined under `acquisition`. Later
+undersampled experiments group an integer number of these source frames:
+
+```yaml
+acquisition:
+  frame_duration_s: 0.055
+
+undersampling:
+  enabled: true
+  # Generate the unique floor/ceil integer multiples around this request.
+  # With 55 ms source frames: 300 ms -> 275 ms and 330 ms.
+  target_frame_duration_s: 0.300
+```
+
+Generate the bounded Step-4 validation for one complete view-order cycle:
+
+```bash
+xcat-icmr generate-undersampled-debug configs/my_simulation.yaml
+```
+
+The combined multicoil k-space is exposed through a small HDF5 virtual dataset,
+so the canonical TR stream is not duplicated. The command saves a temporally
+matched fully sampled reference and a DCF-weighted, coil-combined adjoint for
+comparison. Human-readable records are organized by control-point filename,
+velocity, grouping factor, and actual temporal resolution under the run output;
+content-addressed cache IDs remain the authoritative numerical identity.
+
+After approving that bounded debug, generate both complete bracketed
+acquisitions and their fully sampled ground-truth profiles, without running a
+reconstruction:
+
+```bash
+xcat-icmr generate-undersampled-acquisition configs/my_simulation.yaml
+```
+
+Each `grouped_multicoil_kspace.h5` is a versioned, self-describing
+reconstruction input. Alongside the virtual complex64 k-space it stores the
+exact SigPy trajectory coordinates, normalized DCF, effective low-resolution
+coil maps, frame boundaries, target grid, orientation transforms, NUFFT
+settings, sequence signature, and simulation provenance. A reconstruction
+therefore does not need to reopen or reinterpret the simulation YAML, and it
+validates the acquisition automatically. For optional diagnostics, inspect it
+with:
+
+```bash
+xcat-icmr inspect-acquisition /path/to/grouped_multicoil_kspace.h5
+```
+
+The k-space remains virtual during normal use so the 275 and 330 ms groupings
+do not duplicate the canonical multicoil samples. The canonical acquisition
+must remain in the output cache; a future explicit bundling command can create
+a portable materialized copy when required.
+
+Reconstruction is configured separately from simulation. Copy the shipped
+template, select one or more simulation YAML files and generated frame
+durations, and add one or more reconstruction settings. The cache IDs and
+HDF5 paths are resolved internally:
+
+```yaml
+inputs:
+  simulations:
+    - config: simulation.template.yaml
+      frame_duration_s: 0.330
+```
+
+Advanced users may instead use `inputs.acquisitions` with explicit
+`grouped_multicoil_kspace.h5` paths.
+
+```bash
+cp configs/recon_config.template.yaml configs/my_recon.yaml
+xcat-icmr reconstruct configs/my_recon.yaml --dry-run
+xcat-icmr reconstruct configs/my_recon.yaml
+```
+
+The dry run validates every acquisition and expands every reconstruction
+setting over every input. Acquisition and reconstruction names are generated
+from embedded provenance and validated parameters. Results will be placed in
+readable paths such as
+`reconstructions/causal-irls/o3_cg3_lt0p005_ls0p0005__8fff70bd`; the suffix
+prevents collisions. Optional PCA or fixed-weight ROVIR coil compression is
+controlled under `preprocessing.coil_compression`. Disabled compression does
+not affect the
+reconstruction identity. The first backend is causal Fair-L1 IRLS, adapted
+from the established NIH SPI reconstruction. It reads the trajectory, DCF,
+sensitivity maps, frame boundaries, and NUFFT kernel settings directly from
+the acquisition HDF5. It writes a resumable `reconstruction.h5`, per-frame
+costs and timings, and `result.json`. Completed outputs are reused; pass
+`--overwrite` to replace the matching output.
+
+Compare a completed reconstruction with the fully sampled reference recorded
+in its source acquisition. Passing the reconstruction config assesses every
+completed job selected by that config, so users do not need to copy generated
+output paths or cache IDs:
+
+```bash
+xcat-icmr assess-image-quality configs/my_recon.yaml
+```
+
+Direct reconstruction directories, `result.json`, and `reconstruction.h5`
+paths are also accepted. In a batch, incomplete jobs are reported and skipped;
+the command continues assessing completed jobs and returns a nonzero status if
+anything was skipped or failed. `assess-reconstruction` remains available as
+a compatibility alias.
+
+The assessment applies one global magnitude scale and retains three primary
+outputs: `metrics.json`, a six-panel `summary_line_profiles.png` with tracking,
+apparent-CNR, localization-error, and FWHM diagnostics, and
+`curved_profile_comparison.png`. The curved comparison shows the ground truth,
+the reconstruction, and a false-color fusion in which ground truth is magenta,
+reconstruction is green, and agreement is gray/white. It does not create a
+full 4-D difference volume or separate frame/montage diagnostics.
+
+The metrics retain ground-truth-assisted path localization, apparent CNR, and
+FWHM while also reporting a causal 3-D tracker. Causal errors are decomposed
+into parallel, two normal-direction, perpendicular-magnitude, and total 3-D
+components. Apparent CNR is reported separately at the known and causally
+tracked positions. Parallel FWHM is measured along the curved path;
+perpendicular FWHM is retained for both local normal directions and summarized
+by their median.
+
+Planned paired reconstruction assessment will associate every reconstruction
+with this matching fully sampled reference and report SSIM, RMSE, correlation,
+apparent CNR, balloon visibility, tracking error, and FWHM both along and
+perpendicular to the catheter trajectory. This IQA stage follows validation of
+the grouped acquisition and is not yet implemented.
 
 The acquisition view-order file contains a nonempty integer list of zero-based
 trajectory-TR indices; it does not require plane or interleave metadata.

@@ -311,8 +311,10 @@ class AcquisitionConfig(ConfigModel):
 
 
 class UndersamplingConfig(ConfigModel):
+    """Requested temporal resolution derived from canonical frames."""
+
     enabled: bool
-    frame_duration_s: PositiveFloat
+    target_frame_duration_s: PositiveFloat
 
 
 class NoiseConfig(ConfigModel):

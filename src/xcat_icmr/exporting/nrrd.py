@@ -33,6 +33,63 @@ class NrrdExport:
 ProgressCallback = Callable[[int, int], None]
 
 
+def _reuse_attached_nrrd(
+    destination: Path,
+    *,
+    shape: tuple[int, int, int],
+    frame_count: int,
+    voxel_size_mm: tuple[float, float, float],
+    time_step_s: float,
+    dtype: str,
+    nrrd_type: str,
+    bytes_per_value: int,
+    coordinate_frame: str,
+) -> NrrdExport:
+    """Validate and reuse one raw attached-data NRRD without rewriting it."""
+
+    with destination.open("rb") as stream:
+        prefix = stream.read(16384)
+    separator = prefix.find(b"\n\n")
+    if separator < 0:
+        raise NrrdExportError(
+            f"existing NRRD has no complete header: {destination}; "
+            "pass --overwrite"
+        )
+    header = prefix[: separator + 2].decode("ascii", errors="replace")
+    required = (
+        "NRRD0005",
+        f"type: {nrrd_type}",
+        "dimension: 4",
+        f"sizes: {shape[0]} {shape[1]} {shape[2]} {frame_count}",
+        "encoding: raw",
+        f"xcat_icmr_time_step_s:={time_step_s:g}",
+    )
+    if any(value not in header for value in required):
+        raise NrrdExportError(
+            f"existing NRRD metadata is incompatible: {destination}; "
+            "pass --overwrite"
+        )
+    data_bytes = int(np.prod(shape, dtype=np.int64)) * frame_count * bytes_per_value
+    expected_size = separator + 2 + data_bytes
+    actual_size = destination.stat().st_size
+    if actual_size != expected_size:
+        raise NrrdExportError(
+            f"existing NRRD size is incompatible: {actual_size} != "
+            f"{expected_size}; pass --overwrite"
+        )
+    return NrrdExport(
+        output_path=destination,
+        spatial_shape=shape,
+        frame_count=frame_count,
+        voxel_size_mm=voxel_size_mm,
+        time_step_s=time_step_s,
+        dtype=dtype,
+        coordinate_frame=coordinate_frame,
+        file_size_bytes=actual_size,
+        data_size_bytes=data_bytes,
+    )
+
+
 def _load_contrast(path: Path, variable_name: str) -> np.ndarray:
     if not path.is_file():
         raise NrrdExportError(f"contrast frame does not exist: {path}")
@@ -182,8 +239,16 @@ def export_label_series_nrrd(
     shape = tuple(int(value) for value in first.shape)
     destination = Path(output_path).expanduser().resolve(strict=False)
     if destination.exists() and not overwrite:
-        raise NrrdExportError(
-            f"NRRD output already exists: {destination}; pass --overwrite"
+        return _reuse_attached_nrrd(
+            destination,
+            shape=shape,
+            frame_count=len(paths),
+            voxel_size_mm=voxel,
+            time_step_s=float(time_step_s),
+            dtype="uint16",
+            nrrd_type="ushort",
+            bytes_per_value=2,
+            coordinate_frame="XCAT PCS [Sag, Cor, Tra] / LPS",
         )
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.partial")

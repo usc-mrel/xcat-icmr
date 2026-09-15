@@ -73,3 +73,16 @@ def test_streams_tissue_labels_as_uint16(tmp_path: Path) -> None:
     np.testing.assert_array_equal(values[24:], second.ravel(order="F"))
     assert report.dtype == "uint16"
     assert report.data_size_bytes == 2 * 3 * 4 * 2 * 2
+
+    modification_time = destination.stat().st_mtime_ns
+    reused = export_label_series_nrrd(
+        paths,
+        destination,
+        voxel_size_mm=(1.0, 1.0, 1.0),
+        time_step_s=0.005,
+    )
+    assert reused.output_path == destination.resolve()
+    assert reused.spatial_shape == (2, 3, 4)
+    assert reused.frame_count == 2
+    assert reused.dtype == "uint16"
+    assert destination.stat().st_mtime_ns == modification_time

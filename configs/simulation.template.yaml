@@ -158,7 +158,7 @@ intervention:
     enabled: true
 
     path:
-      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_short.json
+      control_points_file: /server/home/yagiz/CardiacXCATSim/contrast-out/26-02-12/branch_pa_20260418_native_pcs_corrected_extended_reversed_v2.json
       format: 3d-slicer-markups
       coordinate_system: auto
       interpolation: cubic-arc-length
@@ -222,8 +222,10 @@ acquisition:
     variable: trajectory_tr_index_zero_based
 
 undersampling:
-  enabled: false
-  frame_duration_s: 0.050
+  enabled: true
+  # The requested duration is bracketed by floor/ceil integer multiples of the
+  # canonical 55 ms frame: 300 ms -> 5x55=275 ms and 6x55=330 ms.
+  target_frame_duration_s: 0.300
 
 noise:
   enabled: false

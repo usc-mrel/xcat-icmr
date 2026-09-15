@@ -13,9 +13,12 @@ from pydantic import ValidationError
 from scipy.io import loadmat, whosmat
 
 from xcat_icmr.acquisition import (
+    AcquisitionSchemaError,
     AcquisitionScheduleError,
     build_acquisition_schedule,
     estimate_dynamic_acquisition_storage,
+    format_acquisition_inspection,
+    inspect_acquisition,
 )
 from xcat_icmr.acquisition.dynamic import (
     DynamicAcquisitionError,
@@ -27,6 +30,8 @@ from xcat_icmr.acquisition.reference import (
 )
 from xcat_icmr.analysis import (
     CurvedLineProfileError,
+    ReconstructionAssessmentError,
+    assess_reconstruction,
     format_curved_line_profile,
     generate_curved_line_profile,
 )
@@ -37,9 +42,11 @@ from xcat_icmr.cache import (
     contrast_frame_path,
     contrast_profile_path,
     fullysampled_reference_cache_entry,
+    dynamic_acquisition_cache_entry,
     label_cache_entry,
     stage_reuse_status,
     tissue_kspace_cache_entry,
+    undersampled_acquisition_cache_entry,
     write_artifact_manifest,
     write_stage_manifest,
 )
@@ -96,6 +103,7 @@ from xcat_icmr.encoding.tissue_reference import (
     TissueAdjointReferenceError,
     format_tissue_adjoint_reference,
     generate_tissue_adjoint_reference,
+    tissue_adjoint_reference_path,
 )
 from xcat_icmr.encoding.fullysampled_reference import (
     FullysampledReferenceError,
@@ -112,6 +120,12 @@ from xcat_icmr.intervention import (
     BalloonPathError,
     GdSignalError,
     SparseBalloonError,
+)
+from xcat_icmr.undersampling import (
+    GroupedAcquisitionError,
+    format_grouped_acquisition,
+    generate_bracketed_acquisitions,
+    resolve_bracketing_multiples,
 )
 from xcat_icmr.intervention.debug import (
     BalloonDebugError,
@@ -167,6 +181,15 @@ from xcat_icmr.sequence import (
     format_sequence_summary,
     read_sequence,
 )
+from xcat_icmr.reconstruction import (
+    CausalIrlsError,
+    ReconstructionConfigError,
+    ReconstructionPlanError,
+    format_reconstruction_plan,
+    load_reconstruction_config,
+    plan_reconstructions,
+    run_reconstruction_plan,
+)
 from xcat_icmr.signal import (
     ContrastGenerationError,
     MatlabSignalReferenceError,
@@ -191,6 +214,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command")
+
+    simulate_parser = subparsers.add_parser(
+        "simulate",
+        help="validate and run the complete cache-aware simulation pipeline",
+    )
+    simulate_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to a simulation YAML file",
+    )
+    simulate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate and show the resolved pipeline without generating data",
+    )
+    simulate_parser.add_argument(
+        "--chunk-slices",
+        type=int,
+        default=8,
+        help="number of XCAT label slices converted per chunk",
+    )
 
     validate_parser = subparsers.add_parser(
         "validate",
@@ -220,6 +264,36 @@ def build_parser() -> argparse.ArgumentParser:
         "configuration",
         type=Path,
         help="path to a simulation YAML file",
+    )
+
+    inspect_acquisition_parser = subparsers.add_parser(
+        "inspect-acquisition",
+        help="validate and summarize a self-describing simulated k-space file",
+    )
+    inspect_acquisition_parser.add_argument(
+        "acquisition",
+        type=Path,
+        help="path to grouped_multicoil_kspace.h5",
+    )
+
+    reconstruct_parser = subparsers.add_parser(
+        "reconstruct",
+        help="run or preflight modular reconstructions from a recon config",
+    )
+    reconstruct_parser.add_argument(
+        "configuration",
+        type=Path,
+        help="path to recon_config.yaml",
+    )
+    reconstruct_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate inputs and show automatic result paths without reconstructing",
+    )
+    reconstruct_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace matching reconstruction outputs instead of reusing them",
     )
 
     adopt_parser = subparsers.add_parser(
@@ -742,6 +816,30 @@ def build_parser() -> argparse.ArgumentParser:
     dynamic_reference_parser.add_argument("configuration", type=Path)
     dynamic_reference_parser.add_argument("--overwrite", action="store_true")
 
+    grouped_debug_parser = subparsers.add_parser(
+        "generate-undersampled-debug",
+        help=(
+            "group canonical acquisition frames over one view-order cycle and "
+            "save matching full/adjoint references"
+        ),
+    )
+    grouped_debug_parser.add_argument("configuration", type=Path)
+    grouped_debug_parser.add_argument(
+        "--view-order-cycles", type=int, default=1,
+        help="number of complete view-order cycles to inspect (default: 1)",
+    )
+    grouped_debug_parser.add_argument("--overwrite", action="store_true")
+
+    grouped_parser = subparsers.add_parser(
+        "generate-undersampled-acquisition",
+        help=(
+            "generate full floor/ceil temporal groupings and matching fully "
+            "sampled references without reconstruction"
+        ),
+    )
+    grouped_parser.add_argument("configuration", type=Path)
+    grouped_parser.add_argument("--overwrite", action="store_true")
+
     curved_profile_parser = subparsers.add_parser(
         "generate-curved-line-profile",
         help="measure a curved-tube intensity profile in a fully sampled 4-D image",
@@ -756,6 +854,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     curved_profile_parser.add_argument("--overwrite", action="store_true")
+
+    for command, help_text in (
+        (
+            "assess-image-quality",
+            "run image quality assessment against the recorded ground truth",
+        ),
+        (
+            "assess-reconstruction",
+            "compatibility alias for assess-image-quality",
+        ),
+    ):
+        assessment_parser = subparsers.add_parser(command, help=help_text)
+        assessment_parser.add_argument(
+            "target",
+            type=Path,
+            help=(
+                "reconstruction config YAML, reconstruction directory, "
+                "result.json, or reconstruction.h5"
+            ),
+        )
+        assessment_parser.add_argument("--overwrite", action="store_true")
 
     three_position_parser = subparsers.add_parser(
         "generate-three-position-reference-debug",
@@ -862,6 +981,187 @@ def _validate(configuration: Path) -> int:
     print("Configuration is valid.\n")
     print(format_summary(config))
     return 0
+
+
+def _simulate(
+    configuration: Path,
+    *,
+    dry_run: bool,
+    chunk_slices: int,
+) -> int:
+    """Run the complete simulation DAG while reusing valid cache entries."""
+
+    validation = _validate(configuration)
+    if validation != 0:
+        return validation
+    try:
+        config = load_config(configuration)
+        factors = resolve_bracketing_multiples(
+            target_frame_duration_s=(
+                config.undersampling.target_frame_duration_s
+            ),
+            source_frame_duration_s=config.acquisition.frame_duration_s,
+        )
+        label_entry = label_cache_entry(config)
+        tissue_entry = tissue_kspace_cache_entry(config)
+        dynamic_entry = dynamic_acquisition_cache_entry(config)
+        grouped_entries = tuple(
+            undersampled_acquisition_cache_entry(
+                config,
+                source_frames_per_output_frame=factor,
+                view_order_cycles=None,
+            )
+            for factor in factors
+        )
+        label_nrrd = None
+        if config.outputs.save_tissue_labels_nrrd:
+            time_step_ms = round(
+                config.outputs.tissue_labels_nrrd_time_step_s * 1e3
+            )
+            label_nrrd = (
+                config.run.output_root
+                / "exports"
+                / (
+                    f"phantom_{config.run.id}_tissue_labels_"
+                    f"{time_step_ms}ms_4d.nrrd"
+                )
+            )
+        labels_reusable = (
+            artifact_cache_status(label_entry).state == "HIT"
+            and (label_nrrd is None or label_nrrd.is_file())
+        )
+        tissue_reusable = artifact_cache_status(tissue_entry).state == "HIT"
+        dynamic_reusable = artifact_cache_status(dynamic_entry).state == "HIT"
+        adjoint = tissue_adjoint_reference_path(config)
+        dynamic_reference = (
+            dynamic_entry.directory
+            / "fullysampled_tissue_gd_reference_4d.h5"
+        )
+        grouped_reusable = tuple(
+            artifact_cache_status(entry).state == "HIT"
+            for entry in grouped_entries
+        )
+        if dry_run:
+            print("\nSimulation pipeline (--dry-run)")
+            for name, entry, reusable in (
+                ("XCAT tissue labels", label_entry, labels_reusable),
+                ("Tissue k-space library", tissue_entry, tissue_reusable),
+                (
+                    "Dynamic tissue-plus-Gd acquisition",
+                    dynamic_entry,
+                    dynamic_reusable,
+                ),
+            ):
+                action = "REUSE" if reusable else "GENERATE"
+                print(f"{action:8s} {name}")
+                print(f"         {entry.directory}")
+            print(
+                f"{'REUSE' if adjoint.is_file() else 'GENERATE':8s} "
+                "Tissue adjoint reference"
+            )
+            print(f"         {adjoint}")
+            print(
+                f"{'REUSE' if dynamic_reference.is_file() else 'GENERATE':8s} "
+                "Fully sampled tissue-plus-Gd reference"
+            )
+            print(f"         {dynamic_reference}")
+            for factor, entry, reusable in zip(
+                factors, grouped_entries, grouped_reusable, strict=True
+            ):
+                action = "REUSE" if reusable else "GENERATE"
+                duration_ms = (
+                    factor * config.acquisition.frame_duration_s * 1e3
+                )
+                print(
+                    f"{action:8s} Undersampled acquisition ({duration_ms:g} ms)"
+                )
+                print(f"         {entry.directory}")
+            print("\nNo simulation data were generated.")
+            return 0
+
+        stages = (
+            (
+                "XCAT tissue labels",
+                labels_reusable,
+                lambda: _generate_dynamic_cycle(
+                    configuration,
+                    chunk_slices=chunk_slices,
+                    regenerate_from_frame=None,
+                ),
+            ),
+            (
+                "Tissue k-space library",
+                tissue_reusable,
+                lambda: _generate_tissue_kspace_library(
+                    configuration,
+                    start_frame=1,
+                    end_frame=None,
+                    overwrite=False,
+                    dry_run=False,
+                ),
+            ),
+            (
+                "Tissue adjoint reference",
+                adjoint.is_file(),
+                lambda: _generate_tissue_adjoint_reference(
+                    configuration,
+                    start_frame=1,
+                    end_frame=None,
+                    overwrite=False,
+                    allow_missing=False,
+                ),
+            ),
+            (
+                "Dynamic tissue-plus-Gd acquisition",
+                dynamic_reusable,
+                lambda: _generate_dynamic_acquisition(
+                    configuration,
+                    overwrite=False,
+                    dry_run=False,
+                    view_order_cycles=None,
+                    save_adjoint_debug=False,
+                ),
+            ),
+            (
+                "Fully sampled tissue-plus-Gd reference",
+                dynamic_reference.is_file(),
+                lambda: _generate_dynamic_reference(
+                    configuration, overwrite=False
+                ),
+            ),
+            (
+                "Temporally grouped undersampled acquisitions",
+                all(grouped_reusable),
+                lambda: _generate_undersampled_acquisition(
+                    configuration, overwrite=False
+                ),
+            ),
+        )
+        for index, (name, reusable, action) in enumerate(stages, start=1):
+            print(f"\n=== Simulation stage {index}/{len(stages)}: {name} ===")
+            if reusable:
+                print("REUSE: compatible cached output is complete.")
+                continue
+            status = action()
+            if status != 0:
+                print(
+                    f"Simulation stopped at stage {index}: {name}",
+                    file=sys.stderr,
+                )
+                return status
+        print(
+            "\nSimulation complete. Reconstruction and image quality "
+            "assessment remain separate stages."
+        )
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Simulation error:\n  {exc}", file=sys.stderr)
+        return 2
 
 
 def _inspect_sequence(
@@ -1558,7 +1858,8 @@ def _write_dynamic_stage_manifests(config, frames: XcatFramePlan) -> None:
                 f"frame {frame.index} has no label path for manifest"
             )
         label_paths.append(frame.label_path)
-        contrast_paths.append(contrast_frame_path(config, frame.index))
+        if config.outputs.save_gt_contrast:
+            contrast_paths.append(contrast_frame_path(config, frame.index))
     label_entry = label_cache_entry(config)
     contrast_entry = contrast_cache_entry(config)
     indices = [frame.index for frame in frames.frames]
@@ -1569,19 +1870,20 @@ def _write_dynamic_stage_manifests(config, frames: XcatFramePlan) -> None:
         completed_frame_indices=indices,
         outputs=label_paths,
     )
-    write_artifact_manifest(
-        contrast_entry,
-        status="complete",
-        frame_count=len(frames.frames),
-        completed_frame_indices=indices,
-        outputs=[contrast_profile_path(config), *contrast_paths],
-    )
     write_stage_manifest(config, "labels", label_paths)
-    write_stage_manifest(
-        config,
-        "contrast",
-        [contrast_profile_path(config), *contrast_paths],
-    )
+    if config.outputs.save_gt_contrast:
+        write_artifact_manifest(
+            contrast_entry,
+            status="complete",
+            frame_count=len(frames.frames),
+            completed_frame_indices=indices,
+            outputs=[contrast_profile_path(config), *contrast_paths],
+        )
+        write_stage_manifest(
+            config,
+            "contrast",
+            [contrast_profile_path(config), *contrast_paths],
+        )
 
 
 def _inspect_reuse(configuration: Path) -> int:
@@ -1670,10 +1972,6 @@ def _generate_dynamic_cycle(
             raise XcatLabelConversionError(
                 "streaming generation requires save_tissue_labels: true"
             )
-        if not config.outputs.save_gt_contrast:
-            raise RfProfileContrastError(
-                "streaming generation requires save_gt_contrast: true"
-            )
         if config.scanner.effects.off_resonance.enabled:
             raise NotImplementedError(
                 "off-resonance bSSFP signal simulation is not implemented"
@@ -1735,8 +2033,10 @@ def _generate_dynamic_cycle(
         reused_labels = 0
         reused_contrasts = 0
 
-        def ensure_contrast(frame, *, label_existed: bool) -> bool:
+        def ensure_contrast(frame, *, label_existed: bool) -> bool | None:
             nonlocal profile_written, reused_contrasts
+            if not config.outputs.save_gt_contrast:
+                return None
             if frame.label_path is None:
                 raise XcatLabelConversionError(
                     f"frame {frame.index} has no label destination"
@@ -1882,9 +2182,14 @@ def _generate_dynamic_cycle(
             contrast_reused = ensure_contrast(
                 frame, label_existed=label_reused
             )
+            contrast_status = (
+                "not retained"
+                if contrast_reused is None
+                else "reused" if contrast_reused else "generated"
+            )
             print(
                 f"Frame {frame.index}/{total}: label verified, raw removed, "
-                f"contrast {'reused' if contrast_reused else 'generated'}",
+                f"contrast {contrast_status}",
                 flush=True,
             )
 
@@ -2569,6 +2874,113 @@ def _generate_dynamic_reference(configuration: Path, *, overwrite: bool) -> int:
         return 2
 
 
+def _generate_undersampled_debug(
+    configuration: Path,
+    *,
+    view_order_cycles: int,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        results = generate_bracketed_acquisitions(
+            config,
+            view_order_cycles=view_order_cycles,
+            save_adjoint=True,
+            analyze_curve=False,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        for result in results:
+            print("\n" + format_grouped_acquisition(result))
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        GroupedAcquisitionError,
+        DynamicAcquisitionError,
+        AcquisitionScheduleError,
+        SequenceReadError,
+        SensitivityMapError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Undersampled debug error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _generate_undersampled_acquisition(
+    configuration: Path,
+    *,
+    overwrite: bool,
+) -> int:
+    try:
+        config = load_config(configuration)
+        results = generate_bracketed_acquisitions(
+            config,
+            view_order_cycles=None,
+            save_adjoint=False,
+            analyze_curve=True,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        for result in results:
+            print("\n" + format_grouped_acquisition(result))
+        return 0
+    except (
+        ConfigurationLoadError,
+        ValidationError,
+        GroupedAcquisitionError,
+        CurvedLineProfileError,
+        DynamicAcquisitionError,
+        AcquisitionScheduleError,
+        SequenceReadError,
+        SensitivityMapError,
+        NufftBackendError,
+        OSError,
+        ValueError,
+    ) as exc:
+        print(f"Undersampled acquisition error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _inspect_acquisition_file(acquisition: Path) -> int:
+    try:
+        print(format_acquisition_inspection(inspect_acquisition(acquisition)))
+        return 0
+    except (AcquisitionSchemaError, OSError, KeyError, TypeError, ValueError) as exc:
+        print(f"Acquisition inspection error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _reconstruct(
+    configuration: Path, *, dry_run: bool, overwrite: bool = False
+) -> int:
+    try:
+        config = load_reconstruction_config(configuration)
+        plan = plan_reconstructions(config, configuration_path=configuration)
+        print(format_reconstruction_plan(plan))
+        if dry_run:
+            return 0
+        outputs = run_reconstruction_plan(plan, config, overwrite=overwrite)
+        for output in outputs:
+            print(f"SAVED {output}")
+        return 0
+    except (
+        ReconstructionConfigError,
+        ReconstructionPlanError,
+        CausalIrlsError,
+        AcquisitionSchemaError,
+        ValidationError,
+        OSError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        print(f"Reconstruction configuration error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
 def _generate_curved_line_profile(
     configuration: Path,
     *,
@@ -2594,6 +3006,85 @@ def _generate_curved_line_profile(
         ValueError,
     ) as exc:
         print(f"Curved-line profile error:\n  {exc}", file=sys.stderr)
+        return 2
+
+
+def _print_assessment_result(result) -> None:
+    print(f"Frames:              {result.frame_count}")
+    print(f"Metrics:             {result.metrics_path}")
+    print(f"Curved comparison:   {result.curved_profile_path}")
+    print(f"Summary figure:      {result.summary_figure_path}")
+
+
+def _assess_reconstruction(path: Path, *, overwrite: bool) -> int:
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+        if resolved.suffix.lower() in {".yaml", ".yml"}:
+            config = load_reconstruction_config(resolved)
+            plan = plan_reconstructions(
+                config, configuration_path=resolved
+            )
+            completed = 0
+            skipped = 0
+            failed = 0
+            print("Image quality assessment batch")
+            print(f"Configuration: {resolved}")
+            print(f"Planned jobs:  {len(plan.jobs)}")
+            for index, job in enumerate(plan.jobs, start=1):
+                label = (
+                    f"{job.acquisition.display_label} | "
+                    f"{job.readable_recipe}"
+                )
+                print(f"\n[{index}/{len(plan.jobs)}] {label}")
+                if job.status != "complete":
+                    print(
+                        f"SKIP: reconstruction status is {job.status}; "
+                        f"expected {job.output_directory}"
+                    )
+                    skipped += 1
+                    continue
+                try:
+                    result = assess_reconstruction(
+                        job.output_directory,
+                        overwrite=overwrite,
+                        progress=lambda message: print(message, flush=True),
+                    )
+                except (
+                    ReconstructionAssessmentError,
+                    OSError,
+                    KeyError,
+                    ValueError,
+                ) as exc:
+                    print(f"FAILED: {exc}", file=sys.stderr)
+                    failed += 1
+                    continue
+                completed += 1
+                print("ASSESSED")
+                _print_assessment_result(result)
+            print("\nImage quality assessment batch summary")
+            print(f"Assessed: {completed}")
+            print(f"Skipped:  {skipped}")
+            print(f"Failed:   {failed}")
+            return 0 if skipped == 0 and failed == 0 else 2
+
+        result = assess_reconstruction(
+            resolved,
+            overwrite=overwrite,
+            progress=lambda message: print(message, flush=True),
+        )
+        print("Image quality assessment")
+        _print_assessment_result(result)
+        return 0
+    except (
+        ReconstructionAssessmentError,
+        ReconstructionConfigError,
+        ReconstructionPlanError,
+        ValidationError,
+        OSError,
+        KeyError,
+        ValueError,
+    ) as exc:
+        print(f"Image quality assessment error:\n  {exc}", file=sys.stderr)
         return 2
 
 
@@ -2967,12 +3458,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "simulate":
+        return _simulate(
+            args.configuration,
+            dry_run=args.dry_run,
+            chunk_slices=args.chunk_slices,
+        )
     if args.command == "validate":
         return _validate(args.configuration)
     if args.command == "inspect-reuse":
         return _inspect_reuse(args.configuration)
     if args.command == "inspect-cache":
         return _inspect_artifact_cache(args.configuration)
+    if args.command == "inspect-acquisition":
+        return _inspect_acquisition_file(args.acquisition)
+    if args.command == "reconstruct":
+        return _reconstruct(
+            args.configuration,
+            dry_run=args.dry_run,
+            overwrite=args.overwrite,
+        )
     if args.command == "adopt-legacy-cache":
         return _adopt_legacy_cache(
             args.configuration,
@@ -3114,10 +3619,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _generate_dynamic_reference(
             args.configuration, overwrite=args.overwrite
         )
+    if args.command == "generate-undersampled-debug":
+        return _generate_undersampled_debug(
+            args.configuration,
+            view_order_cycles=args.view_order_cycles,
+            overwrite=args.overwrite,
+        )
+    if args.command == "generate-undersampled-acquisition":
+        return _generate_undersampled_acquisition(
+            args.configuration,
+            overwrite=args.overwrite,
+        )
     if args.command == "generate-curved-line-profile":
         return _generate_curved_line_profile(
             args.configuration,
             input_path=args.input,
+            overwrite=args.overwrite,
+        )
+    if args.command in ("assess-image-quality", "assess-reconstruction"):
+        return _assess_reconstruction(
+            args.target,
             overwrite=args.overwrite,
         )
     if args.command == "generate-three-position-reference-debug":

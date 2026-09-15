@@ -15,7 +15,6 @@ import numpy as np
 from scipy.io import savemat
 from scipy.ndimage import map_coordinates
 
-from xcat_icmr.acquisition.dynamic import plan_dynamic_acquisition
 from xcat_icmr.cache import dynamic_acquisition_cache_entry
 from xcat_icmr.encoding.tissue_library import _grid
 from xcat_icmr.intervention import interpolate_cubic_arc_length, load_balloon_path
@@ -232,6 +231,31 @@ def generate_curved_line_profile(
     )
     if not source.is_file():
         raise CurvedLineProfileError(f"fully sampled input does not exist: {source}")
+    with h5py.File(source, "r") as source_handle:
+        source_image = source_handle.get("image")
+        if not isinstance(source_image, h5py.Dataset) or source_image.ndim != 4:
+            raise CurvedLineProfileError(
+                "fully sampled input has no four-dimensional image dataset"
+            )
+        source_frame_count = int(source_image.shape[3])
+        source_frame_duration_s = float(
+            source_image.attrs.get(
+                "frame_duration_s", config.acquisition.frame_duration_s
+            )
+        )
+        saved_times = source_handle.get("frame_center_time_s")
+        frame_times = (
+            np.asarray(saved_times[:], dtype=np.float64)
+            if isinstance(saved_times, h5py.Dataset)
+            else (
+                np.arange(source_frame_count, dtype=np.float64) + 0.5
+            )
+            * source_frame_duration_s
+        )
+    if frame_times.shape != (source_frame_count,):
+        raise CurvedLineProfileError(
+            "fully sampled input frame-center times have an incompatible shape"
+        )
     balloon_path = config.intervention.gd_balloon.path.control_points_file
     if balloon_path is None:
         raise CurvedLineProfileError("the configuration has no balloon path")
@@ -267,19 +291,6 @@ def generate_curved_line_profile(
             f"{np.count_nonzero(~in_bounds)} interpolated path samples leave "
             "the reconstructed FOV"
         )
-    plan = plan_dynamic_acquisition(config, check_free_space=False)
-    frame_times = np.asarray(
-        [
-            np.mean(
-                plan.schedule.time_s[
-                    frame * plan.schedule.trs_per_frame :
-                    (frame + 1) * plan.schedule.trs_per_frame
-                ]
-            )
-            for frame in range(plan.schedule.frame_count)
-        ],
-        dtype=np.float64,
-    )
     output_dir = source.parent / "analysis" / "curved_line_profile"
     mat_path = output_dir / "curved_line_profile.mat"
     heatmap_path = output_dir / "tube_max_time_distance.png"
@@ -300,7 +311,7 @@ def generate_curved_line_profile(
         "target_fov_mm": list(config.encoding.target_fov_mm),
         "reconstruction_shape": list(reconstruction_shape),
         "velocity_cm_per_s": config.intervention.gd_balloon.movement.velocity_cm_per_s,
-        "frame_duration_s": config.acquisition.frame_duration_s,
+        "frame_duration_s": source_frame_duration_s,
     }
     fingerprint = hashlib.sha256(
         json.dumps(fingerprint_content, sort_keys=True).encode("utf-8")
@@ -312,7 +323,7 @@ def generate_curved_line_profile(
             if metadata.get("fingerprint") == fingerprint:
                 return CurvedLineProfileResult(
                     source, output_dir, mat_path, heatmap_path, geometry_path,
-                    plan.schedule.frame_count, len(arc_mm), curve.total_length_mm,
+                    source_frame_count, len(arc_mm), curve.total_length_mm,
                     True,
                 )
         except (OSError, json.JSONDecodeError):
@@ -334,7 +345,7 @@ def generate_curved_line_profile(
         float(np.min(voxel_size)),
         settings.angular_samples,
     )
-    tube_max = np.empty((plan.schedule.frame_count, len(arc_mm)), dtype=np.float32)
+    tube_max = np.empty((source_frame_count, len(arc_mm)), dtype=np.float32)
     tube_mean = np.empty_like(tube_max)
     centerline = np.empty_like(tube_max)
     temporal_max = np.zeros(reconstruction_shape, dtype=np.float32)
@@ -343,14 +354,14 @@ def generate_curved_line_profile(
         complete = handle.get("frame_complete")
         if (
             not isinstance(image, h5py.Dataset)
-            or image.shape != reconstruction_shape + (plan.schedule.frame_count,)
+            or image.shape != reconstruction_shape + (source_frame_count,)
             or not isinstance(complete, h5py.Dataset)
             or not np.all(complete[:])
         ):
             raise CurvedLineProfileError(
                 "fully sampled input is incomplete or has an incompatible shape"
             )
-        for frame in range(plan.schedule.frame_count):
+        for frame in range(source_frame_count):
             magnitude = np.abs(np.asarray(image[..., frame])).astype(
                 np.float32, copy=False
             )
@@ -384,7 +395,7 @@ def generate_curved_line_profile(
         tube_max, arc_mm, frame_times, temporal_max, curve_voxel,
         heatmap_path, geometry_path,
         config.intervention.gd_balloon.movement.velocity_cm_per_s,
-        config.acquisition.frame_duration_s,
+        source_frame_duration_s,
     )
     metadata = dict(fingerprint_content)
     metadata.update(
@@ -394,7 +405,7 @@ def generate_curved_line_profile(
             "analysis_values": "magnitude",
             "curve_length_mm": curve.total_length_mm,
             "arc_sample_count": len(arc_mm),
-            "frame_count": plan.schedule.frame_count,
+            "frame_count": source_frame_count,
             "frame_center_time_s": frame_times.tolist(),
         }
     )
@@ -403,7 +414,7 @@ def generate_curved_line_profile(
     )
     return CurvedLineProfileResult(
         source, output_dir, mat_path, heatmap_path, geometry_path,
-        plan.schedule.frame_count, len(arc_mm), curve.total_length_mm, False,
+        source_frame_count, len(arc_mm), curve.total_length_mm, False,
     )
 
 

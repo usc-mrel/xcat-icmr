@@ -25,7 +25,7 @@ def test_stage_digests_have_expected_dependency_boundaries(tmp_path: Path) -> No
     changed = config.model_copy(
         update={
             "undersampling": config.undersampling.model_copy(
-                update={"frame_duration_s": 0.2}
+                update={"target_frame_duration_s": 0.2}
             )
         }
     )
@@ -86,7 +86,7 @@ def test_artifact_ids_ignore_run_name_and_undersampling() -> None:
                 update={"id": "another-run", "output_root": Path("outputs/other")}
             ),
             "undersampling": config.undersampling.model_copy(
-                update={"frame_duration_s": 0.2}
+                update={"target_frame_duration_s": 0.2}
             ),
         }
     )

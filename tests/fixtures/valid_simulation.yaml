@@ -125,7 +125,7 @@ acquisition:
 
 undersampling:
   enabled: false
-  frame_duration_s: 0.050
+  target_frame_duration_s: 0.300
 
 noise:
   enabled: false

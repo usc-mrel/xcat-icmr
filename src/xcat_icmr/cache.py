@@ -31,6 +31,7 @@ CacheKind = Literal[
     "fullysampled_reference",
     "gd_kspace",
     "dynamic_acquisition",
+    "undersampled_acquisition",
 ]
 CACHE_SCHEMA_VERSION = 1
 CACHE_ID_LENGTH = 16
@@ -405,6 +406,28 @@ def dynamic_acquisition_cache_entry(config: SimulationConfig) -> ArtifactCacheEn
         "composition": "tissue_selected_arm + additive_sparse_gd_selected_arm",
     }
     return _artifact_entry(config, "dynamic_acquisition", payload)
+
+
+def undersampled_acquisition_cache_entry(
+    config: SimulationConfig,
+    *,
+    source_frames_per_output_frame: int,
+    view_order_cycles: int | None,
+) -> ArtifactCacheEntry:
+    """Resolve one temporal grouping of the canonical dynamic TR stream."""
+
+    source = dynamic_acquisition_cache_entry(config)
+    payload: dict[str, object] = {
+        "cache_schema": CACHE_SCHEMA_VERSION,
+        "kind": "undersampled_acquisition",
+        "generation_algorithm": 1,
+        "source_dynamic_acquisition_cache_id": source.cache_id,
+        "source_frame_duration_s": config.acquisition.frame_duration_s,
+        "source_frames_per_output_frame": source_frames_per_output_frame,
+        "view_order_cycles": view_order_cycles,
+        "incomplete_final_frame": config.acquisition.incomplete_final_frame,
+    }
+    return _artifact_entry(config, "undersampled_acquisition", payload)
 
 
 def label_frame_path(config: SimulationConfig, frame_index: int) -> Path:
